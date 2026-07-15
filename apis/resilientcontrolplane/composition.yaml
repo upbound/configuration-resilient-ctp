@@ -1,0 +1,36 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  labels:
+    crossplane.io/xrd: resilientcontrolplanes.resilient.platform.upbound.io
+  name: resilientcontrolplanes.resilient.platform.upbound.io
+spec:
+  compositeTypeRef:
+    apiVersion: resilient.platform.upbound.io/v1alpha1
+    kind: ResilientControlPlane
+  mode: Pipeline
+  pipeline:
+  # Fetch the local k8gb Gslb resources so the resilience engine can read their
+  # health. Peer/own heartbeat resources are composed by this XR (as Observe /
+  # managed MRs) and therefore already arrive in observed resources.
+  - step: fetch-gslb
+    functionRef:
+      name: crossplane-contrib-function-extra-resources
+    input:
+      apiVersion: extra-resources.fn.crossplane.io/v1beta1
+      kind: Input
+      spec:
+        extraResources:
+        - apiVersion: k8gb.absa.oss/v1beta1
+          kind: Gslb
+          into: gslbs
+          type: Selector
+          selector:
+            minMatch: 0
+            maxMatch: 100
+  - step: resilience
+    functionRef:
+      name: upbound-configuration-resilient-ctpresilientcontrolplane
+  - step: auto-ready
+    functionRef:
+      name: crossplane-contrib-function-auto-ready

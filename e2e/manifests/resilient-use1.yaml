@@ -1,0 +1,28 @@
+# Applied ON the us-east-1 EKS control plane (the priority-1 primary).
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: member
+  namespace: default
+spec:
+  providerConfigName: default
+  identity:
+    id: resilient-use1
+    provider: aws
+    region: us-east-1
+    geoTag: us
+    priority: 1
+  members:
+  - {id: resilient-use1, provider: aws, region: us-east-1, geoTag: us, priority: 1}
+  - {id: resilient-usw2, provider: aws, region: us-west-2, geoTag: us, priority: 2}
+  gslb:
+    hostname: app.cloud.example.com
+    strategy: failover
+  k8gb:
+    install: never          # Test 1: heartbeat+priority election (GSLB degraded)
+  heartbeat:
+    freshnessTTLSeconds: 180
+    writeThrottleSeconds: 30
+  failback:
+    automatic: true
+    hysteresisPeriods: 2

@@ -1,0 +1,15 @@
+# Applied IDENTICALLY on BOTH control planes. Same bucketName -> same
+# crossplane.io/external-name -> the ONE shared S3 bucket. The leader manages
+# it (managementPolicies ["*"]); the standby observes it (["Observe"]).
+# NOTE: bucketName must be globally unique in S3 — change the suffix if taken.
+apiVersion: s3.aws.platform.upbound.io/v1alpha1
+kind: Bucket
+metadata:
+  name: shared
+  namespace: default
+spec:
+  parameters:
+    region: us-east-1
+    bucketName: resilient-ctp-demo-shared-bucket-use1usw2
+    resilience:
+      enabled: true

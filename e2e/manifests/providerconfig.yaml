@@ -1,0 +1,16 @@
+# Namespaced (Crossplane v2) AWS ProviderConfig for the composed *.aws.m.upbound.io
+# MRs (SSM heartbeat Parameter, S3 Bucket). The credential secret must live in
+# THIS namespace (default) — secretRef.namespace is not honored for namespaced
+# ProviderConfigs. Applied on BOTH EKS control planes.
+apiVersion: aws.m.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+  namespace: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: default
+      name: aws-creds
+      key: credentials

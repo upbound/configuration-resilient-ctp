@@ -1,0 +1,302 @@
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: resilientcontrolplanes.resilient.platform.upbound.io
+spec:
+  group: resilient.platform.upbound.io
+  scope: Namespaced
+  names:
+    kind: ResilientControlPlane
+    plural: resilientcontrolplanes
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              description: Specification for a resilient control plane member
+              required:
+                - identity
+                - members
+                - gslb
+              properties:
+                providerConfigName:
+                  type: string
+                  description: Default provider config name used for heartbeat resources
+                  default: default
+                identity:
+                  type: object
+                  description: Identity of this control plane in the resilience set
+                  required:
+                    - id
+                    - provider
+                    - region
+                    - geoTag
+                    - priority
+                  properties:
+                    id:
+                      type: string
+                      description: Control plane ID (matches its ControlPlane id)
+                    provider:
+                      type: string
+                      description: Cloud provider
+                      enum:
+                        - aws
+                        - azure
+                        - gcp
+                        - alibaba
+                    region:
+                      type: string
+                      description: Cloud region where this control plane runs
+                    geoTag:
+                      type: string
+                      description: Geographic tag for k8gb (e.g., us, eu, ap)
+                    priority:
+                      type: integer
+                      description: Priority level (lower = higher priority = preferred primary)
+                      minimum: 1
+                members:
+                  type: array
+                  description: All control planes in this resilience set
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - provider
+                      - region
+                      - geoTag
+                      - priority
+                    properties:
+                      id:
+                        type: string
+                        description: Member control plane ID
+                      provider:
+                        type: string
+                        description: Member cloud provider
+                        enum:
+                          - aws
+                          - azure
+                          - gcp
+                          - alibaba
+                      region:
+                        type: string
+                        description: Member cloud region
+                      geoTag:
+                        type: string
+                        description: Member geographic tag
+                      priority:
+                        type: integer
+                        description: Member priority
+                        minimum: 1
+                      providerConfigName:
+                        type: string
+                        description: Provider config to read this member's heartbeat (defaults to spec.providerConfigName)
+                gslb:
+                  type: object
+                  description: Global server load balancing configuration
+                  required:
+                    - hostname
+                    - strategy
+                  properties:
+                    hostname:
+                      type: string
+                      description: The GSLB record whose health is watched
+                    strategy:
+                      type: string
+                      description: k8gb load balancing strategy
+                      enum:
+                        - failover
+                        - roundRobin
+                        - geoip
+                      default: failover
+                k8gb:
+                  type: object
+                  description: Optional k8gb installation configuration
+                  properties:
+                    install:
+                      type: string
+                      description: Whether to install k8gb operator
+                      enum:
+                        - never
+                        - auto
+                        - always
+                      default: never
+                    version:
+                      type: string
+                      description: k8gb version to install
+                      default: v0.15.0
+                    dnsZones:
+                      type: array
+                      description: DNS zones for k8gb
+                      items:
+                        type: object
+                        required:
+                          - parentZone
+                          - loadBalancedZone
+                        properties:
+                          parentZone:
+                            type: string
+                            description: Parent DNS zone
+                          loadBalancedZone:
+                            type: string
+                            description: Load balanced DNS zone
+                          negTTL:
+                            type: integer
+                            description: Negative TTL in seconds
+                            default: 30
+                    edgeDNSServers:
+                      type: array
+                      description: Edge DNS servers
+                      items:
+                        type: string
+                    logLevel:
+                      type: string
+                      description: k8gb operator log level
+                      default: info
+                      enum:
+                        - debug
+                        - info
+                        - warn
+                        - error
+                    helmProviderConfigName:
+                      type: string
+                      description: provider-helm ProviderConfig used for the k8gb install
+                      default: default
+                heartbeat:
+                  type: object
+                  description: Heartbeat mechanism configuration
+                  properties:
+                    tagKey:
+                      type: string
+                      description: Tag/label key for heartbeat timestamp
+                      default: last-reconciliation-timestamp-utc
+                    freshnessTTLSeconds:
+                      type: integer
+                      description: Heartbeat freshness TTL in seconds
+                      default: 180
+                      minimum: 30
+                    writeThrottleSeconds:
+                      type: integer
+                      description: Minimum seconds between heartbeat writes
+                      default: 60
+                      minimum: 10
+                policyControl:
+                  type: object
+                  description: Management policy control configuration
+                  properties:
+                    mode:
+                      type: string
+                      description: Policy toggle mechanism
+                      enum:
+                        - convention
+                        - patch
+                        - both
+                      default: convention
+                    managedResourceSelector:
+                      type: object
+                      description: Selector for managed resources (patch mode only)
+                      properties:
+                        matchLabels:
+                          type: object
+                          additionalProperties:
+                            type: string
+                failback:
+                  type: object
+                  description: Automatic failback configuration
+                  properties:
+                    automatic:
+                      type: boolean
+                      description: Enable automatic failback
+                      default: true
+                    hysteresisPeriods:
+                      type: integer
+                      description: Number of consecutive healthy periods before failback
+                      default: 3
+                      minimum: 1
+            status:
+              type: object
+              description: Observed state of the resilient control plane
+              properties:
+                role:
+                  type: string
+                  description: Current role in the resilience set
+                  enum:
+                    - leader
+                    - standby
+                    - unknown
+                managementPolicy:
+                  type: array
+                  description: Published management policy decision
+                  items:
+                    type: string
+                selfHeartbeatEpoch:
+                  type: integer
+                  description: Epoch seconds last written to this CP's own heartbeat
+                promotionCandidateSince:
+                  type: string
+                  description: Epoch seconds since this CP became a promotion candidate (failover hysteresis)
+                reason:
+                  type: string
+                  description: Human-readable reason for current role/policy
+                gslb:
+                  type: object
+                  description: GSLB status
+                  properties:
+                    healthy:
+                      type: boolean
+                      description: Whether GSLB considers this geo healthy
+                    isActiveForGeo:
+                      type: boolean
+                      description: Whether GSLB considers this geo active
+                peers:
+                  type: array
+                  description: Status of peer control planes
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        description: Peer control plane ID
+                      ageSeconds:
+                        type: integer
+                        description: Age of peer's heartbeat in seconds
+                      fresh:
+                        type: boolean
+                        description: Whether peer's heartbeat is fresh
+                      gslbHealthy:
+                        type: boolean
+                        description: Whether GSLB reports peer's geo healthy
+                      definitivelyDown:
+                        type: boolean
+                        description: Whether peer is definitively down
+                lastHandoffTime:
+                  type: string
+                  format: date-time
+                  description: Timestamp of last leadership handoff
+                conditions:
+                  type: array
+                  description: Standard Crossplane conditions
+                  items:
+                    type: object
+                    required:
+                      - lastTransitionTime
+                      - reason
+                      - status
+                      - type
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message:
+                        type: string
+                      reason:
+                        type: string
+                      status:
+                        type: string
+                      type:
+                        type: string

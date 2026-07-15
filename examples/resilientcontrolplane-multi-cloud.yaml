@@ -1,0 +1,113 @@
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: ctp-us-east-1
+  namespace: default
+  annotations:
+    resilient.platform.upbound.io/description: "Primary control plane in AWS us-east-1"
+spec:
+  identity:
+    id: ctp-us-east-1
+    provider: aws
+    region: us-east-1
+    geoTag: us
+    priority: 1
+  members:
+    - id: ctp-us-east-1
+      provider: aws
+      region: us-east-1
+      geoTag: us
+      priority: 1
+    - id: ctp-westeurope
+      provider: azure
+      region: westeurope
+      geoTag: eu
+      priority: 2
+    - id: ctp-us-central1
+      provider: gcp
+      region: us-central1
+      geoTag: us
+      priority: 3
+  gslb:
+    hostname: api.global.example.com
+    strategy: roundRobin
+  k8gb:
+    install: auto
+    version: v0.15.0
+    dnsZones:
+      - parentZone: example.com
+        loadBalancedZone: global.example.com
+        negTTL: 30
+    edgeDNSServers:
+      - "1.1.1.1"
+      - "8.8.8.8"
+    logLevel: info
+  heartbeat:
+    tagKey: last-reconciliation-timestamp-utc
+    freshnessTTLSeconds: 180
+    writeThrottleSeconds: 60
+  policyControl:
+    mode: convention
+    managedResourceSelector:
+      matchLabels:
+        resilient.crossplane.io/managed: "true"
+  failback:
+    automatic: true
+    hysteresisPeriods: 5
+---
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: ctp-westeurope
+  namespace: default
+  annotations:
+    resilient.platform.upbound.io/description: "Secondary control plane in Azure West Europe"
+spec:
+  identity:
+    id: ctp-westeurope
+    provider: azure
+    region: westeurope
+    geoTag: eu
+    priority: 2
+  members:
+    - id: ctp-us-east-1
+      provider: aws
+      region: us-east-1
+      geoTag: us
+      priority: 1
+    - id: ctp-westeurope
+      provider: azure
+      region: westeurope
+      geoTag: eu
+      priority: 2
+    - id: ctp-us-central1
+      provider: gcp
+      region: us-central1
+      geoTag: us
+      priority: 3
+  gslb:
+    hostname: api.global.example.com
+    strategy: roundRobin
+  k8gb:
+    install: auto
+    version: v0.15.0
+    dnsZones:
+      - parentZone: example.com
+        loadBalancedZone: global.example.com
+        negTTL: 30
+    edgeDNSServers:
+      - "1.1.1.1"
+      - "8.8.8.8"
+    logLevel: info
+  heartbeat:
+    tagKey: last-reconciliation-timestamp-utc
+    freshnessTTLSeconds: 180
+    writeThrottleSeconds: 60
+  policyControl:
+    mode: convention
+    managedResourceSelector:
+      matchLabels:
+        resilient.crossplane.io/managed: "true"
+  failback:
+    automatic: true
+    hysteresisPeriods: 5
