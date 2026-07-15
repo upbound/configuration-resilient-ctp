@@ -223,7 +223,30 @@ status:
 
 ## 9. Policy-toggle mechanisms
 
-### 9.1 Convention path (default; Test 1 uses this first)
+### 9.0 Recommended: `function-management-policies` (the drop-in function)
+
+The **recommended integration** is the standalone
+[`function-management-policies`](https://github.com/upbound/function-management-policies)
+Composition Function. Add it **late** in any composition's pipeline (after the
+resource-composing functions, alongside `function-auto-ready`) and that
+composition becomes resilience-aware with **no embedded logic**:
+
+- It fetches the local `ResilientControlPlane` itself (via a required-resources
+  requirement) and reads `status.role`.
+- **Leader:** leaves each composed MR's `managementPolicies` untouched, honoring
+  the composition author's intent **per resource** (`[Create,Update,Observe]`
+  omitting Delete, `["*"]`, `["Observe"]`, … — each preserved granularly).
+- **Standby / unresolved:** reduces each governed MR to the passive policy
+  (default `["Observe"]`). Fail-safe; never fails open.
+- Per-resource intent is **auto-restored on promotion** (the composer re-declares
+  it each reconcile; the function only overrides while standby) — no stateful
+  memory, and no need for the workload to consult `status.managementPolicy`
+  itself.
+
+This supersedes the hand-rolled convention in §9.1 for new work; §9.1/§9.2 are
+retained as background. `configuration-aws-s3` uses this function.
+
+### 9.1 Convention path (superseded by §9.0; kept for background)
 `resilient-ctp` publishes the decision at **`ResilientControlPlane.status.managementPolicy`**. A
 **resilience-aware** workload package fetches that XR via `function-extra-resources` and applies the
 value to its own managed resources' `spec.managementPolicies`. Clean ownership; the workload package
