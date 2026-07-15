@@ -1,0 +1,38 @@
+apiVersion: meta.dev.upbound.io/v2alpha1
+kind: Project
+metadata:
+  name: configuration-resilient-ctp
+spec:
+  dependsOn:
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Function
+    package: xpkg.upbound.io/crossplane-contrib/function-extra-resources
+    version: '>=v0.3.0'
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Function
+    package: xpkg.upbound.io/crossplane-contrib/function-auto-ready
+    version: '>=v0.6.4'
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Provider
+    package: xpkg.upbound.io/upbound/provider-helm
+    version: '>=v1.0.0'
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Provider
+    package: xpkg.upbound.io/upbound/provider-aws-ssm
+    version: '>=v2.6.0'
+  description: |
+    Autonomous multi-control-plane failover/failback via Crossplane
+    managementPolicies. Installed on every control plane in a resilience set:
+    exactly one control plane holds managementPolicies ["*"] over the shared
+    managed resources while the others sit at ["Observe"], with automatic
+    failover and failback driven by k8gb GSLB health plus a cross-CP heartbeat
+    ledger. Implemented with a Python composition function.
+  license: Apache-2.0
+  maintainer: Upbound <support@upbound.io>
+  readme: |
+    # configuration-resilient-ctp
+
+    Generalizes the configuration-k8gb-bluegreen pattern into a reusable
+    resilience package. See docs/SPEC.md and docs/ROADMAP.md.
+  repository: xpkg.upbound.io/upbound/configuration-resilient-ctp
+  source: github.com/upbound/configuration-resilient-ctp

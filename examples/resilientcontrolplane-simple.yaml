@@ -1,0 +1,61 @@
+# Simplest resilience set: two AWS control planes, one primary + one standby.
+# Apply this member manifest ON the us-east-1 control plane; apply the mirror
+# (identity=ctp-us-west-2, priority 2) on the us-west-2 control plane. Both list
+# the SAME `members` so each can find and observe its peers.
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: ctp-us-east-1
+  namespace: default
+spec:
+  # Who THIS control plane is. Lowest priority number = preferred leader.
+  identity:
+    id: ctp-us-east-1
+    provider: aws
+    region: us-east-1
+    geoTag: us
+    priority: 1
+  # Every control plane in the set (identical list on all members). Peer
+  # heartbeat coordinates (provider/region/name) are derived from these entries.
+  members:
+    - id: ctp-us-east-1
+      provider: aws
+      region: us-east-1
+      geoTag: us
+      priority: 1
+    - id: ctp-us-west-2
+      provider: aws
+      region: us-west-2
+      geoTag: us
+      priority: 2
+  # k8gb GSLB record whose health gates leadership. `failover` = active/passive.
+  gslb:
+    hostname: app.cloud.example.com
+    strategy: failover
+  # Optionally install k8gb here. `auto` installs only if k8gb is absent;
+  # use `never` (default) to rely on heartbeat + priority alone (no DNS).
+  k8gb:
+    install: auto
+    version: v0.15.0
+    dnsZones:
+      - parentZone: example.com
+        loadBalancedZone: cloud.example.com
+        negTTL: 30
+    edgeDNSServers:
+      - "1.1.1.1"
+    logLevel: info
+  # Liveness ledger: each CP stamps this tag with epoch-seconds on its own
+  # heartbeat resource; peers observe it. A peer older than freshnessTTLSeconds
+  # is considered down. Keep TTL comfortably above the provider observe lag.
+  heartbeat:
+    tagKey: last-reconciliation-timestamp-utc
+    freshnessTTLSeconds: 180
+    writeThrottleSeconds: 60
+  # How the leadership decision reaches workload resources. `convention`:
+  # resilience-aware packages read status.managementPolicy (see configuration-aws-s3).
+  policyControl:
+    mode: convention
+  # Automatic failback to a recovered higher-priority CP, damped by hysteresis.
+  failback:
+    automatic: true
+    hysteresisPeriods: 3
