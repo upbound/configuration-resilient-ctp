@@ -8,10 +8,17 @@ Function language: **Python** (generalized from the KCL-based `configuration-k8g
 ## 1. Purpose
 
 `configuration-resilient-ctp` is a Crossplane v2 Configuration package installed on **every control
-plane in a resilience set**. It makes exactly **one** control plane the *main* (holding
-`managementPolicies: ["*"]` over the shared managed resources) while the others sit at
-`["Observe"]`, and it performs **autonomous failover and failback** when control planes suffer
-outages — with no human in the loop.
+plane in a resilience set**. It makes exactly **one** control plane the *leader* — the one that
+**actively manages** the shared resources, each keeping the composition author's **intended**
+`managementPolicies` (e.g. `["*"]`, `[Create, Update, Observe]`, or `["Observe"]`) — while the
+others reduce to `["Observe"]`. It performs **autonomous failover and failback** when control planes
+suffer outages, with no human in the loop.
+
+> resilient-ctp decides **leadership**; it does not dictate the write-scope. The effective
+> `managementPolicies` per resource is applied by
+> [`function-management-policies`](https://github.com/upbound/function-management-policies) (§9.0):
+> the leader honors each resource's intended policy, standbys are reduced to `["Observe"]`. The
+> `["*"]` values below are illustrative of a "fully manage" intent, not a hardcoded value.
 
 It does **not** provision the control plane or own the workload resources. It only:
 
@@ -128,7 +135,8 @@ the **default** so we never depend on `ControlPlane` XR visibility on a workload
 
 ## 6. Leadership decision (the AND rule)
 
-A control plane **holds/takes `["*"]` on the shared resource iff all hold**:
+A control plane is the **leader** (its governed resources keep their intended `managementPolicies`;
+peers reduce to `["Observe"]`) **iff all hold**:
 
 1. **GSLB-healthy** for its geo (local `Gslb.status` shows this cluster serving/healthy), **and**
 2. **self-heartbeat fresh** (it can write its own heartbeat), **and**
@@ -318,12 +326,17 @@ and an **`Observe` MR** pointed at the derived coordinates.
 `configuration-aws-ctp` (us-east-1 priority 1, us-west-2 priority 2), each running
 `resilient-ctp` + `configuration-aws-s3`, sharing one S3 bucket:
 
-- **Steady state:** us-east-1 = leader (`["*"]`, manages the bucket); us-west-2 =
-  standby (`["Observe"]`, observes the *same* bucket).
+Re-validated (2026-07-15) with `function-management-policies` and an **omit-Delete
+intent** (`[Create, Update, Observe]`) on the bucket:
+
+- **Steady state:** us-east-1 = leader → bucket honors `[Create, Update, Observe]`
+  (**not** escalated to `["*"]`); us-west-2 = standby → `["Observe"]`, observes the
+  *same* bucket.
 - **Failover:** pausing the primary → its heartbeat goes stale → the standby
-  promotes to leader and its bucket flips to `["*"]`, taking over the same bucket.
-- **Failback:** resuming the primary → it reclaims leader, standby returns to
-  `["Observe"]`. The bucket survived the whole cycle.
+  promotes and its bucket becomes `[Create, Update, Observe]` (same intent honored).
+- **Failback:** resuming the primary → it reclaims leader honoring
+  `[Create, Update, Observe]`; standby returns to `["Observe"]`. The bucket
+  survived the whole cycle and the intent was preserved throughout.
 
 ### Learnings folded back into the design
 
