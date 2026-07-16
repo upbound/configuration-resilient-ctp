@@ -11,10 +11,11 @@ contention) carrying a single timestamp tag/label. This control plane:
 
 Peer coordinates (provider/region/name) are derived from ``spec.members``.
 
-Only AWS (SSM Parameter, ``ssm.aws.m.upbound.io/v1beta1``) is implemented for
-Tests 1-2; Azure/GCP builders raise until their phases (SPEC §5.1). The tag is
-read back from ``status.atProvider.tags`` (verified present on the SSM Parameter
-CRD).
+AWS (SSM Parameter, ``ssm.aws.m.upbound.io/v1beta1``) and Azure (Resource Group,
+``azure.m.upbound.io/v1beta1``) are implemented; GCP/Alibaba builders raise
+until their phases (SPEC §5.1). The timestamp is read back from
+``status.atProvider.tags`` (provider-agnostic in ``read_peer``); confirm the tag
+surfaces there for each provider before relying on it live (SPEC §5.1 caveat).
 """
 
 from dataclasses import dataclass
@@ -69,6 +70,36 @@ def _aws_parameter(name: str, namespace: str, external_name: str, region: str,
     }
 
 
+def _azure_resource_group(name: str, namespace: str, external_name: str,
+                          location: str, provider_config: str,
+                          mgmt_policies: list, tags: dict) -> dict:
+    """Build an Azure Resource Group MR (namespaced v2 provider). A Resource
+    Group is free at rest and taggable; the heartbeat timestamp lives in
+    ``tags`` and is read back from ``status.atProvider.tags`` (same shape as the
+    AWS SSM Parameter). ``external-name`` is the Resource Group name so every
+    peer can reconstruct it from the cp id."""
+    return {
+        "apiVersion": "azure.m.upbound.io/v1beta1",
+        "kind": "ResourceGroup",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "annotations": {
+                "crossplane.io/composition-resource-name": name,
+                "crossplane.io/external-name": external_name,
+            },
+        },
+        "spec": {
+            "managementPolicies": mgmt_policies,
+            "forProvider": {
+                "location": location,
+                "tags": tags,
+            },
+            "providerConfigRef": {"name": provider_config, "kind": "ProviderConfig"},
+        },
+    }
+
+
 def build_parameter(provider: str, name: str, namespace: str, cp_id: str,
                     region: str, provider_config: str, mgmt_policies: list,
                     tags: dict) -> dict:
@@ -77,6 +108,10 @@ def build_parameter(provider: str, name: str, namespace: str, cp_id: str,
     if provider == "aws":
         return _aws_parameter(name, namespace, external_name, region,
                               provider_config, mgmt_policies, tags)
+    if provider == "azure":
+        # region carries the Azure location for azure members.
+        return _azure_resource_group(name, namespace, external_name, region,
+                                     provider_config, mgmt_policies, tags)
     raise NotImplementedError(
         f"heartbeat resource for provider '{provider}' not implemented yet "
         f"(see docs/ROADMAP.md phases 2-3)"
