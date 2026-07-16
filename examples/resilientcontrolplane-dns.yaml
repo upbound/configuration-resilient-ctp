@@ -1,0 +1,51 @@
+# Resilience set using the DNS heartbeat backend (cloud- and cloud-credential-
+# agnostic). Instead of a per-CP cloud resource (SSM Parameter), each control
+# plane publishes its last-reconcile timestamp as a TXT record
+# recon-heartbeat-<id>.<zone> via external-dns, and reads peers by resolving
+# those records live. No cloud-provider credentials are used for the heartbeat;
+# external-dns (which k8gb deploys) owns the DNS backend credentials.
+#
+# Prerequisites on each control plane:
+#   - external-dns running and authoritative for <zone> (k8gb install handles
+#     this, or bring your own), watching DNSEndpoint CRs.
+#   - provider-kubernetes installed with a ProviderConfig (default) that can
+#     apply the DNSEndpoint in this namespace.
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: ctp-us-east-1
+  namespace: default
+spec:
+  identity:
+    id: ctp-us-east-1
+    provider: aws
+    region: us-east-1
+    geoTag: us
+    priority: 1
+  members:
+    - id: ctp-us-east-1
+      provider: aws
+      region: us-east-1
+      geoTag: us
+      priority: 1
+    - id: ctp-us-west-2
+      provider: aws
+      region: us-west-2
+      geoTag: us
+      priority: 2
+  gslb:
+    hostname: app.cloud.example.com
+    strategy: failover
+  heartbeat:
+    # Select the DNS backend (mutually exclusive with the default
+    # cloudResource backend).
+    backend: dns
+    dns:
+      # Zone the per-CP TXT records live under; must be resolvable from the
+      # control planes and served by the external-dns the CPs write to.
+      zone: cloud.example.com
+      ttlSeconds: 30
+      # provider-kubernetes ProviderConfig used to apply the DNSEndpoint.
+      kubernetesProviderConfigName: default
+    freshnessTTLSeconds: 180
+    writeThrottleSeconds: 60

@@ -171,6 +171,46 @@ spec:
                   type: object
                   description: Heartbeat mechanism configuration
                   properties:
+                    backend:
+                      type: string
+                      description: >-
+                        Heartbeat backend (mutually exclusive). 'cloudResource'
+                        (default) writes the timestamp to a per-CP cloud
+                        resource tag (e.g. an AWS SSM Parameter) and reads peers
+                        via Observe MRs. 'dns' writes the timestamp to a TXT
+                        record recon-heartbeat-<id>.<zone> via external-dns (a
+                        DNSEndpoint applied through provider-kubernetes) and
+                        reads peers via live DNS resolution - cloud- and
+                        cloud-credential-agnostic.
+                      enum:
+                        - cloudResource
+                        - dns
+                      default: cloudResource
+                    dns:
+                      type: object
+                      description: >-
+                        DNS heartbeat backend configuration (used only when
+                        backend is 'dns'). external-dns owns the DNS backend
+                        credentials, so no cloud-provider credentials are set
+                        here.
+                      properties:
+                        zone:
+                          type: string
+                          description: >-
+                            DNS zone under which per-CP heartbeat TXT records
+                            are published and resolved (e.g. cloud.example.com).
+                            The record is recon-heartbeat-<id>.<zone>.
+                        ttlSeconds:
+                          type: integer
+                          description: TTL of the heartbeat TXT record.
+                          default: 30
+                          minimum: 1
+                        kubernetesProviderConfigName:
+                          type: string
+                          description: >-
+                            provider-kubernetes ProviderConfig used to apply the
+                            DNSEndpoint on this control plane.
+                          default: default
                     tagKey:
                       type: string
                       description: Tag/label key for heartbeat timestamp

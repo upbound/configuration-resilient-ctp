@@ -40,6 +40,30 @@ def peer_hb_resource_name(cp_id: str) -> str:
     return f"heartbeat-peer-{cp_id}"
 
 
+def heartbeat_fqdn(cp_id: str, zone: str) -> str:
+    """FQDN of a control plane's heartbeat TXT record (DNS backend). Reuses the
+    same ``recon-heartbeat-<id>`` convention as the cloud-resource external-name
+    so every peer can reconstruct it purely from the id and the shared zone."""
+    return f"{heartbeat_external_name(cp_id)}.{zone.rstrip('.')}"
+
+
+def encode_dns_payload(epoch: int, role: str, cp_id: str) -> str:
+    """Encode the heartbeat payload carried in the TXT record value. Compact
+    ``k=v;k=v`` so it is a single, human-readable TXT string."""
+    return f"ts={int(epoch)};role={role};cp={cp_id}"
+
+
+def parse_dns_payload(txt: str) -> dict:
+    """Parse a TXT record value produced by ``encode_dns_payload``. Tolerant of
+    extra/missing fields; returns a dict (never raises)."""
+    out = {}
+    for part in str(txt).split(";"):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
 def as_int(value, default: int = 0) -> int:
     """Best-effort int() that never raises (heartbeat tags are strings)."""
     try:

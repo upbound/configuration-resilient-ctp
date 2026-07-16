@@ -1,2 +1,5 @@
 crossplane-function-sdk-python==0.9.0
 pydantic==2.12.4
+# DNS heartbeat backend (spec.heartbeat.backend: dns): live TXT resolution of
+# peers' heartbeat records. Only used when the dns backend is selected.
+dnspython==2.7.0

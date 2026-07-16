@@ -132,6 +132,29 @@ tests = [
          [assert_role("standby")],
          observed=[peer_hb("cp-b", "us-west-2", 1700000000, "leader")]),
 
+    # DNS heartbeat backend: single-member set (no peer resolution) -> leader,
+    # own heartbeat published as an external-dns DNSEndpoint wrapped in a
+    # namespaced provider-kubernetes Object (write path).
+    test("dns-backend-write-path",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            heartbeat={"backend": "dns", "dns": {"zone": "cloud.example.com"}}),
+         [{
+             "apiVersion": "kubernetes.m.crossplane.io/v1alpha1",
+             "kind": "Object",
+             "metadata": {"annotations": {
+                 "crossplane.io/composition-resource-name": "heartbeat-self"}},
+             "spec": {
+                 "managementPolicies": ["*"],
+                 "providerConfigRef": {"kind": "ProviderConfig"},
+                 "forProvider": {"manifest": {
+                     "apiVersion": "externaldns.k8s.io/v1alpha1",
+                     "kind": "DNSEndpoint",
+                     "spec": {"endpoints": [{
+                         "dnsName": "recon-heartbeat-cp-a.cloud.example.com",
+                         "recordType": "TXT"}]}}},
+             },
+         }]),
+
     # Optional k8gb install (auto) renders the helm Releases when GSLB absent.
     test("k8gb-install-auto",
          xr("cp-a", MEMBER_A,

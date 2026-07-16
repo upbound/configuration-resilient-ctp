@@ -17,8 +17,15 @@ Module layout mirrors configuration-aws-ctp: a flat function directory with a
 
 from crossplane.function import resource, response
 
-from . import election, gslb, heartbeat, k8gb_install, status
-from .prelude import ROLE_TAG, SELF_HB, TS_TAG_DEFAULT, as_int, now_epoch
+from . import dns_heartbeat, election, gslb, heartbeat, k8gb_install, status
+from .prelude import (
+    ROLE_TAG,
+    SELF_HB,
+    TS_TAG_DEFAULT,
+    as_int,
+    heartbeat_fqdn,
+    now_epoch,
+)
 
 EXTRA_RESOURCES_KEY = "apiextensions.crossplane.io/extra-resources"
 
@@ -48,6 +55,9 @@ def _compose(req, rsp):
     ts_tag = hb_cfg.get("tagKey", TS_TAG_DEFAULT)
     ttl = int(hb_cfg.get("freshnessTTLSeconds", 180))
     throttle = int(hb_cfg.get("writeThrottleSeconds", 60))
+    backend = hb_cfg.get("backend", "cloudResource")
+    dns_cfg = hb_cfg.get("dns", {}) or {}
+    dns_zone = dns_cfg.get("zone", "")
     hysteresis = int(failback_cfg.get("hysteresisPeriods", 3))
     now = now_epoch()
 
@@ -62,11 +72,22 @@ def _compose(req, rsp):
     gslb_signal = gslb.evaluate(gslbs, gslb_cfg.get("hostname", ""),
                                 gslb_cfg.get("strategy", "failover"))
 
-    # 2. Peers' liveness (exclude self by id).
-    peers = [
-        heartbeat.read_peer(m, observed, ts_tag, now, ttl)
-        for m in members if m.get("id") != identity["id"]
-    ]
+    # 2. Peers' liveness (exclude self by id). Source depends on the backend:
+    #    cloudResource -> observed Observe MRs; dns -> live TXT resolution.
+    peer_members = [m for m in members if m.get("id") != identity["id"]]
+    if backend == "dns":
+        peers = [
+            dns_heartbeat.read_peer_dns(
+                m, dns_heartbeat.resolve_txt(heartbeat_fqdn(m["id"], dns_zone)),
+                now, ttl,
+            )
+            for m in peer_members
+        ]
+    else:
+        peers = [
+            heartbeat.read_peer(m, observed, ts_tag, now, ttl)
+            for m in peer_members
+        ]
 
     # 3. Decide.
     decision = election.decide(
@@ -76,31 +97,46 @@ def _compose(req, rsp):
     )
 
     # 4a. Own heartbeat, throttled: reuse the previous epoch if it is still
-    # within the throttle window AND the role hasn't changed.
-    prev = (
-        observed.get(SELF_HB, {})
-        .get("status", {}).get("atProvider", {}).get("tags", {}) or {}
-    )
-    prev_epoch = as_int(prev.get(ts_tag), 0)
-    prev_role = prev.get(ROLE_TAG, "")
+    # within the throttle window AND the role hasn't changed. The previous
+    # epoch comes from the observed own MR (cloudResource) or from prior XR
+    # status (dns: the DNSEndpoint's TXT value is not observed back).
+    if backend == "dns":
+        prev_epoch = as_int(prior_status.get("selfHeartbeatEpoch"), 0)
+        prev_role = prior_status.get("role", "")
+    else:
+        prev = (
+            observed.get(SELF_HB, {})
+            .get("status", {}).get("atProvider", {}).get("tags", {}) or {}
+        )
+        prev_epoch = as_int(prev.get(ts_tag), 0)
+        prev_role = prev.get(ROLE_TAG, "")
     if prev_epoch and (now - prev_epoch) < throttle and prev_role == decision.role:
         epoch_to_write = prev_epoch
     else:
         epoch_to_write = now
 
-    self_name, self_res = heartbeat.build_own(
-        identity, namespace, provider_config, ts_tag, epoch_to_write,
-        decision.role,
-    )
-    resource.update(rsp.desired.resources[self_name], self_res)
+    if backend == "dns":
+        # Own heartbeat: external-dns DNSEndpoint (via provider-kubernetes
+        # Object). No peer Observe resources — peers are read via live DNS.
+        self_name, self_res = dns_heartbeat.build_own_object(
+            identity, namespace, dns_zone,
+            int(dns_cfg.get("ttlSeconds", 30)),
+            dns_cfg.get("kubernetesProviderConfigName", "default"),
+            epoch_to_write, decision.role,
+        )
+        resource.update(rsp.desired.resources[self_name], self_res)
+    else:
+        self_name, self_res = heartbeat.build_own(
+            identity, namespace, provider_config, ts_tag, epoch_to_write,
+            decision.role,
+        )
+        resource.update(rsp.desired.resources[self_name], self_res)
 
-    # 4b. Observe MRs for every peer.
-    for m in members:
-        if m.get("id") == identity["id"]:
-            continue
-        name, res = heartbeat.build_peer_observe(m, namespace, provider_config,
-                                                 ts_tag)
-        resource.update(rsp.desired.resources[name], res)
+        # 4b. Observe MRs for every peer (cloudResource backend only).
+        for m in peer_members:
+            name, res = heartbeat.build_peer_observe(
+                m, namespace, provider_config, ts_tag)
+            resource.update(rsp.desired.resources[name], res)
 
     # 5. Optional k8gb install.
     install_mode = k8gb_cfg.get("install", "never")

@@ -133,6 +133,28 @@ deployment or GitOps-replicated), the same fields may instead be auto-derived fr
 via `function-extra-resources` — the member list is simply the explicit carrier of that data and is
 the **default** so we never depend on `ControlPlane` XR visibility on a workload CP.
 
+### 5.3 Heartbeat backends (`spec.heartbeat.backend`)
+
+The ledger is pluggable and **mutually exclusive** per `spec.heartbeat.backend`:
+
+| Backend | Write | Read | Credentials |
+| --- | --- | --- | --- |
+| `cloudResource` (default) | per-CP cloud resource tag (AWS SSM `Parameter`; Azure/GCP per ROADMAP) | Observe MR → `status.atProvider.tags` | cloud-provider creds (the provider's `ProviderConfig`) |
+| `dns` | TXT record `recon-heartbeat-<id>.<zone>` published by **external-dns** (a `DNSEndpoint` applied via a namespaced provider-kubernetes `Object`) | **live DNS resolution** of the peer's TXT record (`dnspython`) | **none in the RCP** — external-dns owns the DNS backend creds; reads are plain DNS queries |
+
+The `dns` backend is **cloud- and cloud-credential-agnostic**: the same record
+format works regardless of where the zone is hosted (RFC2136/BIND, Route53,
+Cloudflare, … — whatever external-dns is configured for), and no AWS/Azure/GCP
+credentials are needed for the heartbeat. The record value is
+`ts=<epoch>;role=<role>;cp=<id>`. Liveness/freshness semantics are identical to
+`cloudResource` (unreadable ⇒ not fresh; never fail open). Prerequisites: an
+external-dns authoritative for `<zone>` on each CP (the optional k8gb install
+provides one) and provider-kubernetes with a usable `ProviderConfig`.
+
+Because reads are live DNS, there are **no peer Observe resources** in `dns`
+mode; the write-throttle reuses the previous epoch from prior XR status
+(`status.selfHeartbeatEpoch`) rather than an observed resource.
+
 ## 6. Leadership decision (the AND rule)
 
 A control plane is the **leader** (its governed resources keep their intended `managementPolicies`;
