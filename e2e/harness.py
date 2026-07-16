@@ -80,8 +80,13 @@ def _bucket_exists(bucket, region):
     try:
         s3.head_bucket(Bucket=bucket)
         return True
-    except ClientError:
-        return False
+    except ClientError as err:
+        # S3 returns 404 for a missing bucket and 403 when the bucket exists
+        # but the calling principal lacks direct access (it is managed by the
+        # provider's principal, not the caller). For an existence check, 403
+        # means "exists".
+        status = int(err.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0))
+        return status == 403
 
 
 def apply_manifests(args):
