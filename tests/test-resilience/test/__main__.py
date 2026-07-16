@@ -59,8 +59,8 @@ def peer_hb(cp_id, region, epoch, role):
                  "forProvider": {"region": region}},
         "status": {"atProvider": {"tags": {
             "last-reconciliation-timestamp-utc": str(epoch),
-            "resilient.crossplane.io/role": role,
-            "resilient.crossplane.io/cp-id": cp_id}}},
+            "resilient-role": role,
+            "resilient-cp-id": cp_id}}},
     }
 
 
@@ -70,7 +70,7 @@ def assert_role(role):
         "metadata": {"annotations": {
             "crossplane.io/composition-resource-name": "heartbeat-self"}},
         "spec": {
-            "forProvider": {"tags": {"resilient.crossplane.io/role": role}},
+            "forProvider": {"tags": {"resilient-role": role}},
             # v2 namespaced MRs require providerConfigRef.kind.
             "providerConfigRef": {"kind": "ProviderConfig"},
         },
@@ -90,8 +90,8 @@ def peer_hb_azure(cp_id, location, epoch, role):
                  "forProvider": {"location": location}},
         "status": {"atProvider": {"tags": {
             "last-reconciliation-timestamp-utc": str(epoch),
-            "resilient.crossplane.io/role": role,
-            "resilient.crossplane.io/cp-id": cp_id}}},
+            "resilient-role": role,
+            "resilient-cp-id": cp_id}}},
     }
 
 
@@ -102,7 +102,7 @@ def assert_role_azure(role):
         "metadata": {"annotations": {
             "crossplane.io/composition-resource-name": "heartbeat-self"}},
         "spec": {
-            "forProvider": {"tags": {"resilient.crossplane.io/role": role}},
+            "forProvider": {"tags": {"resilient-role": role}},
             "providerConfigRef": {"kind": "ProviderConfig"},
         },
     }
