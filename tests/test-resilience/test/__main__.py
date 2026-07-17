@@ -20,6 +20,10 @@ MEMBER_A = {"id": "cp-a", "provider": "aws", "region": "us-east-1",
             "geoTag": "us", "priority": 1}
 MEMBER_B = {"id": "cp-b", "provider": "aws", "region": "us-west-2",
             "geoTag": "us", "priority": 2}
+MEMBER_AZ = {"id": "cp-az", "provider": "azure", "region": "eastus",
+             "geoTag": "eu", "priority": 2}
+MEMBER_AZ_PRI1 = {"id": "cp-az", "provider": "azure", "region": "eastus",
+                  "geoTag": "eu", "priority": 1}
 
 
 def xr(name, identity, members, *, gslb=None, k8gb=None, heartbeat=None,
@@ -55,8 +59,8 @@ def peer_hb(cp_id, region, epoch, role):
                  "forProvider": {"region": region}},
         "status": {"atProvider": {"tags": {
             "last-reconciliation-timestamp-utc": str(epoch),
-            "resilient.crossplane.io/role": role,
-            "resilient.crossplane.io/cp-id": cp_id}}},
+            "resilient-role": role,
+            "resilient-cp-id": cp_id}}},
     }
 
 
@@ -66,8 +70,39 @@ def assert_role(role):
         "metadata": {"annotations": {
             "crossplane.io/composition-resource-name": "heartbeat-self"}},
         "spec": {
-            "forProvider": {"tags": {"resilient.crossplane.io/role": role}},
+            "forProvider": {"tags": {"resilient-role": role}},
             # v2 namespaced MRs require providerConfigRef.kind.
+            "providerConfigRef": {"kind": "ProviderConfig"},
+        },
+    }
+
+
+def peer_hb_azure(cp_id, location, epoch, role):
+    """An observed peer heartbeat Resource Group (Azure Observe MR)."""
+    return {
+        "apiVersion": "azure.m.upbound.io/v1beta1", "kind": "ResourceGroup",
+        "metadata": {
+            "name": f"recon-heartbeat-{cp_id}", "namespace": "default",
+            "annotations": {
+                "crossplane.io/composition-resource-name": f"heartbeat-peer-{cp_id}"},
+        },
+        "spec": {"managementPolicies": ["Observe"],
+                 "forProvider": {"location": location}},
+        "status": {"atProvider": {"tags": {
+            "last-reconciliation-timestamp-utc": str(epoch),
+            "resilient-role": role,
+            "resilient-cp-id": cp_id}}},
+    }
+
+
+def assert_role_azure(role):
+    """Assert the Azure control plane's own heartbeat Resource Group role."""
+    return {
+        "apiVersion": "azure.m.upbound.io/v1beta1", "kind": "ResourceGroup",
+        "metadata": {"annotations": {
+            "crossplane.io/composition-resource-name": "heartbeat-self"}},
+        "spec": {
+            "forProvider": {"tags": {"resilient-role": role}},
             "providerConfigRef": {"kind": "ProviderConfig"},
         },
     }
@@ -131,6 +166,25 @@ tests = [
             heartbeat={"freshnessTTLSeconds": 999999999}),
          [assert_role("standby")],
          observed=[peer_hb("cp-b", "us-west-2", 1700000000, "leader")]),
+
+    # Azure control plane, single-member set -> leader; own heartbeat is an
+    # Azure Resource Group (azure.m.upbound.io) carrying the timestamp/role tags.
+    test("azure-leader-alone",
+         xr("cp-az", MEMBER_AZ, [MEMBER_AZ]),
+         [assert_role_azure("leader")]),
+
+    # Cross-cloud read: AWS CP (priority 2) observes a fresh higher-priority
+    # Azure peer's Resource Group heartbeat -> AWS CP stays standby. Exercises
+    # reading an Azure peer's heartbeat from an AWS control plane.
+    test("cross-cloud-standby-behind-azure",
+         xr("cp-b", {"id": "cp-b", "provider": "aws", "region": "us-west-2",
+                     "geoTag": "us", "priority": 2},
+            [MEMBER_AZ_PRI1, {"id": "cp-b", "provider": "aws",
+                              "region": "us-west-2", "geoTag": "us",
+                              "priority": 2}],
+            heartbeat={"freshnessTTLSeconds": 999999999}),
+         [assert_role("standby")],
+         observed=[peer_hb_azure("cp-az", "eastus", 1700000000, "leader")]),
 
     # Optional k8gb install (auto) renders the helm Releases when GSLB absent.
     test("k8gb-install-auto",

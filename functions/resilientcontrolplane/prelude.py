@@ -9,9 +9,13 @@ from datetime import datetime, timezone
 
 # Tag/label keys written onto the heartbeat resource. The timestamp key is the
 # public convention documented in docs/SPEC.md; the others coordinate election.
+# Tag/label KEYS must be portable across AWS, Azure and GCP. Azure tag names
+# forbid '/ < > % & \\ ?' and GCP label keys allow only lowercase
+# [a-z0-9_-] starting with a letter — so no slashes, dots, or uppercase. Keep
+# every key to lowercase letters, digits and hyphens.
 TS_TAG_DEFAULT = "last-reconciliation-timestamp-utc"
-ROLE_TAG = "resilient.crossplane.io/role"
-CPID_TAG = "resilient.crossplane.io/cp-id"
+ROLE_TAG = "resilient-role"
+CPID_TAG = "resilient-cp-id"
 
 # Composition-resource-name for this control plane's own heartbeat.
 SELF_HB = "heartbeat-self"
