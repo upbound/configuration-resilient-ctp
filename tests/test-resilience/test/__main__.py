@@ -237,6 +237,23 @@ tests = [
          [assert_role_gcp("standby")],
          observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader")]),
 
+    # NO DOUBLE-PROMOTION (the key single-leader guarantee for 3+ members):
+    # GCP (pri3) sees the pri1 AWS leader DOWN (stale) but the pri2 Azure peer
+    # still ALIVE -> GCP defers to the higher-priority survivor and stays
+    # standby. Only the highest-priority survivor (Azure) promotes.
+    # (freshnessTTLSeconds=1: epoch 1700000000 is stale; a far-future epoch is
+    # "fresh" because now-epoch is negative <= ttl.)
+    test("tri-cloud-no-double-promote",
+         xr("cp-gcp", MEMBER_GCP, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
+            heartbeat={"freshnessTTLSeconds": 1, "writeThrottleSeconds": 1,
+                       "gcp": {"project": "demo-project"}},
+            failback={"automatic": True, "hysteresisPeriods": 1}),
+         [assert_role_gcp("standby")],
+         observed=[
+             peer_hb("cp-a", "us-east-1", 1700000000, "leader"),       # AWS down
+             peer_hb_azure("cp-az", "eastus", 9999999999, "leader"),   # Azure alive
+         ]),
+
     # Optional k8gb install (auto) renders the helm Releases when GSLB absent.
     test("k8gb-install-auto",
          xr("cp-a", MEMBER_A,
