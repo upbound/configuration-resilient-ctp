@@ -223,8 +223,7 @@ tests = [
     # GCP control plane, single-member set -> leader; own heartbeat is a GCS
     # Bucket (storage.gcp.m.upbound.io) whose labels carry the timestamp/role.
     test("gcp-leader-alone",
-         xr("cp-gcp", MEMBER_GCP, [MEMBER_GCP],
-            heartbeat={"gcp": {"project": "demo-project"}}),
+         xr("cp-gcp", MEMBER_GCP, [MEMBER_GCP]),
          [assert_role_gcp("leader")]),
 
     # Tri-cloud read: a GCP CP (priority 3) observes a fresh higher-priority
@@ -232,8 +231,7 @@ tests = [
     # plane reading a peer's heartbeat in another cloud.
     test("tri-cloud-standby-behind-aws",
          xr("cp-gcp", MEMBER_GCP, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
-            heartbeat={"freshnessTTLSeconds": 999999999,
-                       "gcp": {"project": "demo-project"}}),
+            heartbeat={"freshnessTTLSeconds": 999999999}),
          [assert_role_gcp("standby")],
          observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader")]),
 
@@ -245,8 +243,7 @@ tests = [
     # "fresh" because now-epoch is negative <= ttl.)
     test("tri-cloud-no-double-promote",
          xr("cp-gcp", MEMBER_GCP, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
-            heartbeat={"freshnessTTLSeconds": 1, "writeThrottleSeconds": 1,
-                       "gcp": {"project": "demo-project"}},
+            heartbeat={"freshnessTTLSeconds": 1, "writeThrottleSeconds": 1},
             failback={"automatic": True, "hysteresisPeriods": 1}),
          [assert_role_gcp("standby")],
          observed=[

@@ -101,13 +101,18 @@ def _azure_resource_group(name: str, namespace: str, external_name: str,
 
 
 def _gcp_bucket(name: str, namespace: str, external_name: str, location: str,
-                project: str, provider_config: str, mgmt_policies: list,
+                provider_config: str, mgmt_policies: list,
                 labels: dict) -> dict:
     """Build a GCP Cloud Storage Bucket MR (namespaced v2 provider). Free at
     rest (empty bucket). GCP uses ``labels`` (not ``tags``), so the heartbeat
     timestamp/role/cp-id live in ``forProvider.labels`` and are read back from
     ``status.atProvider.labels``. The portable tag keys (lowercase, hyphens) are
-    already valid GCP label keys."""
+    already valid GCP label keys.
+
+    ``forProvider.project`` is intentionally NOT set: like the AWS account (never
+    named in the API), the GCP project is a property of the credentials and
+    defaults from the referenced ProviderConfig's ``projectID``. This keeps the
+    heartbeat API provider-agnostic."""
     return {
         "apiVersion": "storage.gcp.m.upbound.io/v1beta1",
         "kind": "Bucket",
@@ -122,7 +127,6 @@ def _gcp_bucket(name: str, namespace: str, external_name: str, location: str,
         "spec": {
             "managementPolicies": mgmt_policies,
             "forProvider": {
-                "project": project,
                 "location": location,
                 "labels": labels,
                 "uniformBucketLevelAccess": True,
@@ -135,10 +139,11 @@ def _gcp_bucket(name: str, namespace: str, external_name: str, location: str,
 
 def build_parameter(provider: str, name: str, namespace: str, cp_id: str,
                     region: str, provider_config: str, mgmt_policies: list,
-                    tags: dict, gcp_project: str = "") -> dict:
+                    tags: dict) -> dict:
     """Provider-dispatched heartbeat resource builder. ``tags`` carries the
     heartbeat key/values; each provider places them where it reads them back
-    (AWS/Azure -> tags, GCP -> labels)."""
+    (AWS/Azure -> tags, GCP -> labels). Provider account/project scoping comes
+    from the referenced ProviderConfig, never from the API."""
     external_name = heartbeat_external_name(cp_id)
     if provider == "aws":
         return _aws_parameter(name, namespace, external_name, region,
@@ -149,7 +154,7 @@ def build_parameter(provider: str, name: str, namespace: str, cp_id: str,
                                      provider_config, mgmt_policies, tags)
     if provider == "gcp":
         # region carries the GCP location; tags are written as GCP labels.
-        return _gcp_bucket(name, namespace, external_name, region, gcp_project,
+        return _gcp_bucket(name, namespace, external_name, region,
                            provider_config, mgmt_policies, tags)
     raise NotImplementedError(
         f"heartbeat resource for provider '{provider}' not implemented yet "
@@ -158,8 +163,7 @@ def build_parameter(provider: str, name: str, namespace: str, cp_id: str,
 
 
 def build_own(identity: dict, namespace: str, provider_config: str,
-              ts_tag: str, epoch: int, role: str,
-              gcp_project: str = "") -> tuple[str, dict]:
+              ts_tag: str, epoch: int, role: str) -> tuple[str, dict]:
     """Build this control plane's own (writable) heartbeat resource."""
     tags = {
         ts_tag: str(epoch),
@@ -176,13 +180,12 @@ def build_own(identity: dict, namespace: str, provider_config: str,
         provider_config=provider_config,
         mgmt_policies=["*"],
         tags=tags,
-        gcp_project=gcp_project,
     )
     return SELF_HB, res
 
 
 def build_peer_observe(member: dict, namespace: str, default_provider_config: str,
-                       ts_tag: str, gcp_project: str = "") -> tuple[str, dict]:
+                       ts_tag: str) -> tuple[str, dict]:
     """Build an Observe-only heartbeat resource for a peer, derived from its
     member entry. Tags are not set on an Observe resource (we only read)."""
     name = peer_hb_resource_name(member["id"])
@@ -196,7 +199,6 @@ def build_peer_observe(member: dict, namespace: str, default_provider_config: st
         provider_config=provider_config,
         mgmt_policies=["Observe"],
         tags={},
-        gcp_project=gcp_project,
     )
     return name, res
 
