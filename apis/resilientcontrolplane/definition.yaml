@@ -185,6 +185,18 @@ spec:
                       description: Minimum seconds between heartbeat writes
                       default: 60
                       minimum: 10
+                    gcp:
+                      type: object
+                      description: >-
+                        GCP heartbeat settings (used when a member's provider is
+                        gcp). The heartbeat is a Cloud Storage Bucket whose
+                        labels carry the timestamp/role/cp-id.
+                      properties:
+                        project:
+                          type: string
+                          description: >-
+                            GCP project ID that owns the heartbeat bucket(s).
+                            Required for gcp members.
                 policyControl:
                   type: object
                   description: Management policy control configuration

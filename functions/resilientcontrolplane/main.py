@@ -48,6 +48,8 @@ def _compose(req, rsp):
     ts_tag = hb_cfg.get("tagKey", TS_TAG_DEFAULT)
     ttl = int(hb_cfg.get("freshnessTTLSeconds", 180))
     throttle = int(hb_cfg.get("writeThrottleSeconds", 60))
+    # GCP project for GCS-bucket heartbeats (only used by gcp members).
+    gcp_project = (hb_cfg.get("gcp", {}) or {}).get("project", "")
     hysteresis = int(failback_cfg.get("hysteresisPeriods", 3))
     now = now_epoch()
 
@@ -90,7 +92,7 @@ def _compose(req, rsp):
 
     self_name, self_res = heartbeat.build_own(
         identity, namespace, provider_config, ts_tag, epoch_to_write,
-        decision.role,
+        decision.role, gcp_project=gcp_project,
     )
     resource.update(rsp.desired.resources[self_name], self_res)
 
@@ -99,7 +101,7 @@ def _compose(req, rsp):
         if m.get("id") == identity["id"]:
             continue
         name, res = heartbeat.build_peer_observe(m, namespace, provider_config,
-                                                 ts_tag)
+                                                 ts_tag, gcp_project=gcp_project)
         resource.update(rsp.desired.resources[name], res)
 
     # 5. Optional k8gb install.

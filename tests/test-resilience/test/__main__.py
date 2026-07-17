@@ -24,6 +24,8 @@ MEMBER_AZ = {"id": "cp-az", "provider": "azure", "region": "eastus",
              "geoTag": "eu", "priority": 2}
 MEMBER_AZ_PRI1 = {"id": "cp-az", "provider": "azure", "region": "eastus",
                   "geoTag": "eu", "priority": 1}
+MEMBER_GCP = {"id": "cp-gcp", "provider": "gcp", "region": "asia-southeast1",
+              "geoTag": "ap", "priority": 3}
 
 
 def xr(name, identity, members, *, gslb=None, k8gb=None, heartbeat=None,
@@ -108,6 +110,38 @@ def assert_role_azure(role):
     }
 
 
+def peer_hb_gcp(cp_id, location, epoch, role):
+    """An observed peer heartbeat GCS Bucket (GCP Observe MR). GCP carries the
+    heartbeat in labels, not tags."""
+    return {
+        "apiVersion": "storage.gcp.m.upbound.io/v1beta1", "kind": "Bucket",
+        "metadata": {
+            "name": f"recon-heartbeat-{cp_id}", "namespace": "default",
+            "annotations": {
+                "crossplane.io/composition-resource-name": f"heartbeat-peer-{cp_id}"},
+        },
+        "spec": {"managementPolicies": ["Observe"],
+                 "forProvider": {"location": location}},
+        "status": {"atProvider": {"labels": {
+            "last-reconciliation-timestamp-utc": str(epoch),
+            "resilient-role": role,
+            "resilient-cp-id": cp_id}}},
+    }
+
+
+def assert_role_gcp(role):
+    """Assert the GCP control plane's own heartbeat GCS Bucket role (labels)."""
+    return {
+        "apiVersion": "storage.gcp.m.upbound.io/v1beta1", "kind": "Bucket",
+        "metadata": {"annotations": {
+            "crossplane.io/composition-resource-name": "heartbeat-self"}},
+        "spec": {
+            "forProvider": {"labels": {"resilient-role": role}},
+            "providerConfigRef": {"kind": "ProviderConfig"},
+        },
+    }
+
+
 def gslb_resource(service_health):
     return {
         "apiVersion": "k8gb.absa.oss/v1beta1", "kind": "Gslb",
@@ -185,6 +219,23 @@ tests = [
             heartbeat={"freshnessTTLSeconds": 999999999}),
          [assert_role("standby")],
          observed=[peer_hb_azure("cp-az", "eastus", 1700000000, "leader")]),
+
+    # GCP control plane, single-member set -> leader; own heartbeat is a GCS
+    # Bucket (storage.gcp.m.upbound.io) whose labels carry the timestamp/role.
+    test("gcp-leader-alone",
+         xr("cp-gcp", MEMBER_GCP, [MEMBER_GCP],
+            heartbeat={"gcp": {"project": "demo-project"}}),
+         [assert_role_gcp("leader")]),
+
+    # Tri-cloud read: a GCP CP (priority 3) observes a fresh higher-priority
+    # AWS peer's SSM heartbeat -> GCP CP stays standby. Exercises a GCP control
+    # plane reading a peer's heartbeat in another cloud.
+    test("tri-cloud-standby-behind-aws",
+         xr("cp-gcp", MEMBER_GCP, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
+            heartbeat={"freshnessTTLSeconds": 999999999,
+                       "gcp": {"project": "demo-project"}}),
+         [assert_role_gcp("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader")]),
 
     # Optional k8gb install (auto) renders the helm Releases when GSLB absent.
     test("k8gb-install-auto",
