@@ -48,6 +48,9 @@ def _compose(req, rsp):
     ts_tag = hb_cfg.get("tagKey", TS_TAG_DEFAULT)
     ttl = int(hb_cfg.get("freshnessTTLSeconds", 180))
     throttle = int(hb_cfg.get("writeThrottleSeconds", 60))
+    # Provider account/project scoping comes from each provider's ProviderConfig,
+    # never from this API (the GCP project defaults from the ProviderConfig's
+    # projectID, like the AWS account is implicit in the credentials).
     hysteresis = int(failback_cfg.get("hysteresisPeriods", 3))
     now = now_epoch()
 
