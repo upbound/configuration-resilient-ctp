@@ -1,0 +1,64 @@
+# GSLB-enabled resilience set (AWS us-east-1 primary + Azure eastus standby),
+# single claim. With k8gb.install: auto (the default) the composition installs
+# k8gb and creates the Gslb itself, so applying THIS manifest on each control
+# plane is all an operator does — no manual helm/Gslb steps.
+#
+# Platform prerequisites (one-time, per control plane; see examples/
+# providerconfig-helm.yaml + rbac-k8gb.yaml): provider-helm RBAC to install
+# k8gb, crossplane SA RBAC on gslbs, a delegated DNS zone, and cloud creds.
+#
+# Apply this on us-east-1; apply the mirror (identity=resilient-aze1, priority 2)
+# on the Azure control plane. Both list the SAME members.
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: member
+  namespace: default
+spec:
+  identity:
+    id: resilient-use1
+    provider: aws
+    region: us-east-1
+    geoTag: us
+    priority: 1
+  members:
+    - id: resilient-use1
+      provider: aws
+      region: us-east-1
+      geoTag: us
+      priority: 1
+    - id: resilient-aze1
+      provider: azure
+      region: eastus
+      geoTag: eu
+      priority: 2
+  # GSLB is the primary failure signal. The composition creates this Gslb
+  # (manage: true) with a demo backend to health-check.
+  gslb:
+    hostname: app.failover.gslb.surefoot.online
+    strategy: failover
+    manage: true
+    demoApp: true
+  # k8gb auto-installs (default) with Route53 external-dns.
+  k8gb:
+    install: auto
+    version: v0.15.0
+    dnsProvider: aws
+    extdnsCredentialsSecretName: extdns-aws
+    dnsZones:
+      - parentZone: gslb.surefoot.online
+        loadBalancedZone: failover.gslb.surefoot.online
+        negTTL: 30
+    edgeDNSServers:
+      - "8.8.8.8"
+      - "1.1.1.1"
+    logLevel: info
+  heartbeat:
+    livenessKey: last-reconciliation-timestamp-utc
+    freshnessTTLSeconds: 180
+    writeThrottleSeconds: 60
+  policyControl:
+    mode: convention
+  failback:
+    automatic: true
+    hysteresisPeriods: 3

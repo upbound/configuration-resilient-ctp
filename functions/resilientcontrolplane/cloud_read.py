@@ -1,0 +1,205 @@
+"""Direct, read-only cloud lookups of a heartbeat tag/label.
+
+Why this exists (see docs/SPEC.md §Gotchas/3): a peer's heartbeat lives in an
+external cloud resource, and the only way it reaches this control plane through
+the normal path is a provider *observe poll* (upjet default ``--poll=10m``).
+That poll gates peer freshness far above the freshness TTL and causes
+split-brain. Writing the heartbeat is fine (event-driven on the MR spec change,
+so the cloud value is fresh within ~``writeThrottleSeconds``); only *reading a
+peer's* value is slow.
+
+This module lets the composition function read the peer's tag DIRECTLY from the
+cloud API, bypassing the polled Observe MR. It is deliberately:
+
+- **read-only** — never mutates cloud state, so it does not violate the
+  "composition functions are pure transforms" contract the way a write would;
+- **dependency-injectable** — every reader accepts a ``client`` so it can be
+  unit-tested offline with a fake, and the cloud SDKs are imported lazily so
+  importing this module never requires boto3/azure/google installed;
+- **fail-safe by contract** — a reader returns the tag value (``str``) when the
+  resource is reachable and carries the tag, ``None`` when the resource is
+  reachable but the tag is absent, and raises :class:`CloudReadError` when the
+  value could not be read at all (auth/network/throttle/not-found). The caller
+  MUST map :class:`CloudReadError` to "peer state unknown -> do NOT promote";
+  never to "peer down". A transient read failure must not trigger failover.
+
+Credentials are the caller's responsibility (wired into the function via a
+DeploymentRuntimeConfig secret mount / ambient cloud identity). The readers use
+the SDK's default credential resolution unless an explicit ``client`` is
+injected.
+"""
+
+import os
+from dataclasses import dataclass
+
+# Default per-call budget. The reader runs inside the composition function's
+# gRPC deadline, so keep cloud calls short and let the caller fall back to the
+# prior role on a miss rather than block/fail the reconcile.
+DEFAULT_TIMEOUT_SECONDS = 2.0
+
+# Clients (and the Azure AAD token they cache internally) are reused across
+# reconciles. The composition function is a long-lived gRPC server, so a
+# module-level cache keyed by scope keeps steady-state reads sub-second and
+# avoids re-fetching an AAD token on every call. Injected clients bypass this.
+_CLIENT_CACHE: dict = {}
+
+
+class CloudReadError(Exception):
+    """Raised when a heartbeat tag could not be read (auth, network, throttle,
+    resource-not-found, or any SDK error). The caller treats this as
+    "peer liveness unknown" and must NOT interpret it as "peer down"."""
+
+
+@dataclass
+class _AwsTarget:
+    resource_name: str
+    region: str
+
+
+def read_resource_tag(
+    provider: str,
+    resource_name: str,
+    tag_key: str,
+    *,
+    region: str = "",
+    project: str = "",
+    subscription_id: str = "",
+    credential=None,
+    client=None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+):
+    """Read a single tag/label value off one cloud resource.
+
+    Args:
+        provider: ``"aws"`` | ``"azure"`` | ``"gcp"``.
+        resource_name: cloud name of the heartbeat resource — for us the
+            deterministic external-name ``recon-heartbeat-<cp_id>`` (AWS SSM
+            Parameter name, Azure Resource Group name, GCP bucket name).
+        tag_key: the tag/label key to read (e.g. the timestamp key).
+        region: AWS region (required for aws) / GCP location (unused for read).
+        project: GCP project id (required for gcp).
+        subscription_id: Azure subscription id (required for azure).
+        credential: optional Azure ``TokenCredential`` (else ``DefaultAzureCredential``).
+        client: optional pre-built SDK client — injected in tests; when set,
+            ``region``/``project``/``subscription_id``/``credential`` are ignored.
+        timeout: per-call budget in seconds (best-effort; applied to AWS).
+
+    Returns:
+        The tag value as ``str`` if present, or ``None`` if the resource is
+        reachable but does not carry ``tag_key``.
+
+    Raises:
+        CloudReadError: if the value could not be read (fail-safe -> unknown).
+    """
+    tags = read_resource_tags(
+        provider, resource_name, region=region, project=project,
+        subscription_id=subscription_id, credential=credential, client=client,
+        timeout=timeout,
+    )
+    return tags.get(tag_key)
+
+
+def read_resource_tags(
+    provider: str,
+    resource_name: str,
+    *,
+    region: str = "",
+    project: str = "",
+    subscription_id: str = "",
+    credential=None,
+    client=None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> dict:
+    """Read ALL tags/labels off one cloud resource in a single API call.
+
+    Same contract as :func:`read_resource_tag` but returns the whole
+    ``{key: value}`` dict (empty if the resource carries none). Preferred when
+    the caller needs several keys (e.g. timestamp AND role) so the peer is read
+    once per reconcile. Raises :class:`CloudReadError` if unreadable.
+    """
+    if provider == "aws":
+        return _aws_read_tags(resource_name, region, client, timeout)
+    if provider == "azure":
+        return _azure_read_tags(resource_name, subscription_id, credential,
+                                client, timeout)
+    if provider == "gcp":
+        return _gcp_read_labels(resource_name, project, client)
+    raise CloudReadError(f"direct tag read not supported for provider '{provider}'")
+
+
+def _aws_read_tags(resource_name, region, client, timeout):
+    """Read all of an SSM Parameter's tags via ``ListTagsForResource``."""
+    try:
+        if client is None:
+            cache_key = ("aws-ssm", region, timeout)
+            client = _CLIENT_CACHE.get(cache_key)
+            if client is None:
+                import boto3  # lazy: only needed for a live aws read
+                from botocore.config import Config
+                cfg = Config(connect_timeout=timeout, read_timeout=timeout,
+                             retries={"max_attempts": 1})
+                client = boto3.client("ssm", region_name=region, config=cfg)
+                _CLIENT_CACHE[cache_key] = client
+        resp = client.list_tags_for_resource(
+            ResourceType="Parameter", ResourceId=resource_name,
+        )
+        tags = {t["Key"]: t["Value"] for t in resp.get("TagList", [])}
+    except Exception as e:  # any SDK/network/auth error -> unknown, fail-safe
+        raise CloudReadError(f"aws ssm read of '{resource_name}' failed: {e}") from e
+    return tags
+
+
+def _azure_read_tags(resource_name, subscription_id, credential, client,
+                     timeout=DEFAULT_TIMEOUT_SECONDS):
+    """Read a Resource Group's tag via the resource-manager client. The client
+    caches its AAD token internally, so caching the client across reconciles
+    keeps steady-state reads fast (the first call pays the token fetch).
+
+    The subscription is NOT an API input — it comes from the credentials, like
+    the AWS account and GCP project. If not explicitly provided it is read from
+    the standard ``AZURE_SUBSCRIPTION_ID`` env var, which the control plane sets
+    from the mounted Azure creds secret."""
+    try:
+        if client is None:
+            subscription_id = subscription_id or os.environ.get(
+                "AZURE_SUBSCRIPTION_ID", "")
+            cache_key = ("azure-rm", subscription_id)
+            client = _CLIENT_CACHE.get(cache_key)
+            if client is None:
+                from azure.identity import DefaultAzureCredential
+                try:  # azure-mgmt-resource >=26 moved the client under .resources
+                    from azure.mgmt.resource.resources import ResourceManagementClient
+                except ImportError:
+                    from azure.mgmt.resource import ResourceManagementClient
+                if credential is None:
+                    credential = DefaultAzureCredential()
+                client = ResourceManagementClient(credential, subscription_id)
+                _CLIENT_CACHE[cache_key] = client
+        group = client.resource_groups.get(resource_name, timeout=timeout)
+        tags = group.tags or {}
+    except Exception as e:
+        raise CloudReadError(
+            f"azure resource-group read of '{resource_name}' failed: {e}"
+        ) from e
+    return tags
+
+
+def _gcp_read_labels(resource_name, project, client):
+    """Read a Cloud Storage bucket's label via ``get_bucket``. ``project`` is
+    optional — like the AWS account/GCP project generally, it defaults from the
+    credentials (ADC / GOOGLE_CLOUD_PROJECT) when not given."""
+    try:
+        if client is None:
+            cache_key = ("gcp-storage", project)
+            client = _CLIENT_CACHE.get(cache_key)
+            if client is None:
+                from google.cloud import storage  # lazy
+                client = storage.Client(project=project or None)
+                _CLIENT_CACHE[cache_key] = client
+        bucket = client.get_bucket(resource_name)
+        labels = bucket.labels or {}
+    except Exception as e:
+        raise CloudReadError(
+            f"gcp bucket read of '{resource_name}' failed: {e}"
+        ) from e
+    return labels

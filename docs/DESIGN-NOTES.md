@@ -108,3 +108,51 @@ remove the deterministic-external-name requirement for server-generated IDs.
 | Non-MR side effects on standbys | **Out of scope** for the policy toggle; needs composition-level gating |
 | Shared resource with author-set external-name | Handled — deterministic external-name in the composition |
 | Shared resource with server-generated external-name | **Open** — needs ledger-based external-name propagation (future) |
+
+## 5. Single-claim UX and where prerequisites are irreducible
+
+The product goal is that an app team applies **one** `ResilientControlPlane`
+and nothing else. Everything *installable* is therefore handled by the package,
+idempotently:
+
+- `provider-helm` and `provider-kubernetes` are package dependencies.
+- k8gb is auto-installed by the composition (`k8gb.install: auto`), gated by a
+  presence check so re-installs are no-ops.
+- The composition creates the k8gb `Gslb` (`gslb.manage: true`). It is composed
+  **directly** as a Crossplane v2 resource — v2 lets a composition manage any
+  Kubernetes resource, so no provider-kubernetes `Object` wrapper is needed
+  (this matches configuration-k8gb-bluegreen). Creation is gated on the k8gb
+  operator Release being `Ready`, so a `Gslb` is never applied before its CRD
+  exists.
+
+Two classes of prerequisite are genuinely irreducible and cannot live inside the
+claim:
+
+1. **External state** — a delegated DNS zone and cloud credentials. These live
+   outside any cluster; "bring a domain + creds" is the accepted minimum.
+2. **A one-time RBAC bootstrap** — provider-helm needs broad rights to install
+   k8gb's cluster-scoped resources, and the crossplane service account needs
+   rights on `k8gb.absa.oss/gslbs`. A Kubernetes package **cannot grant itself**
+   these (the API server's privilege-escalation guard forbids it — if it could,
+   it would be an exploit). So this bootstrap is applied once per control plane
+   by the platform/blueprint, shipped as `examples/providerconfig-helm.yaml` and
+   `examples/rbac-k8gb.yaml`. The intent is to fold it into the control-plane
+   provisioning layer so operators never run it by hand either.
+
+The `Gslb` is a non-managed resource, so — like other non-MR side effects
+(§2) — it sits **outside** the managementPolicies toggle. That is correct: the
+`Gslb` is the health *signal* that drives leadership, not a protected workload
+resource. Only the shared managed resources are governed by the leader/standby
+policy.
+
+## 6. Single leader at all times
+
+Across every topology (2×AWS, AWS+Azure, tri-cloud) the invariant is exactly one
+**primary/reconciling** control plane at a time. Multiple standbys are fine;
+they must never be promoted simultaneously. Priority ordering + the two-factor
+AND rule (GSLB-eligible AND heartbeat-fresh AND no higher-priority peer alive)
+enforce this, and the election fail-safe treats an *unreadable* higher-priority
+peer as "possibly alive → stay standby" — it never promotes on its own
+blindness. GSLB is the fast, poll-independent failure trigger; the cross-CP
+heartbeat is the slower confirmation term (see docs/SPEC.md §Gotchas on the
+provider observe-poll vs. freshness-TTL relationship).

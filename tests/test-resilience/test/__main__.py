@@ -142,12 +142,55 @@ def assert_role_gcp(role):
     }
 
 
-def gslb_resource(service_health):
+def gslb_resource(service_health, *, hostname=None, healthy_ips=None,
+                  exposed_ips=None):
+    """A k8gb Gslb status. Pass hostname+healthy_ips+exposed_ips to make this
+    cluster GSLB-*active* (its exposed ingress IPs appear in the healthy DNS
+    records); omit them to model a healthy-but-not-serving (passive) geo."""
+    status = {"serviceHealth": service_health}
+    if hostname and healthy_ips is not None:
+        status["healthyRecords"] = {hostname: healthy_ips}
+    if exposed_ips is not None:
+        status["loadBalancer"] = {"exposedIps": exposed_ips}
     return {
         "apiVersion": "k8gb.absa.oss/v1beta1", "kind": "Gslb",
         "metadata": {"name": "app", "namespace": "default"},
-        "status": {"serviceHealth": service_health},
+        "status": status,
     }
+
+
+def observed_gslb(service_health, *, hostname="app.failover.example.test",
+                  healthy_ips=None, exposed_ips=None):
+    """The composition's OWN Gslb as an observed composed resource (keyed by
+    composition-resource-name gslb-app), so tests exercise reading serviceHealth
+    back from observed composed resources (not just the extra-resources fetch)."""
+    r = gslb_resource(service_health, hostname=hostname, healthy_ips=healthy_ips,
+                      exposed_ips=exposed_ips)
+    r["metadata"]["name"] = "gslb-app"
+    r["metadata"]["annotations"] = {
+        "crossplane.io/composition-resource-name": "gslb-app"}
+    return r
+
+
+def k8gb_operator_ready():
+    """An observed provider-helm Release for the k8gb operator reporting Ready,
+    used to prove the composition creates the Gslb only once k8gb is installed."""
+    return {
+        "apiVersion": "helm.m.crossplane.io/v1beta1", "kind": "Release",
+        "metadata": {"name": "k8gb-operator", "namespace": "default",
+                     "annotations": {
+                         "crossplane.io/composition-resource-name": "k8gb-operator"}},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+    }
+
+
+# Context key the composition reads fetched Gslb resources from.
+EXTRA_RES_KEY = "apiextensions.crossplane.io/extra-resources"
+
+
+def gslb_context(service_health, **kw):
+    """Wrap a Gslb into the context shape function-extra-resources produces."""
+    return {EXTRA_RES_KEY: {"gslbs": [gslb_resource(service_health, **kw)]}}
 
 
 def test(name, the_xr, asserts, *, observed=None, extra=None, context=None):
@@ -268,6 +311,115 @@ tests = [
               "metadata": {"annotations": {
                   "crossplane.io/composition-resource-name": "k8gb-nginx-ingress"}}},
          ]),
+
+    # k8gb stays installed once we installed it, even after our own Gslb exists
+    # (regression: auto used to uninstall k8gb the moment a Gslb appeared, which
+    # removed the CRD and deadlocked the XR). Observed: our operator Release +
+    # our Gslb -> the k8gb Releases are STILL rendered.
+    test("k8gb-kept-installed-when-gslb-present",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.failover.example.test", "strategy": "failover",
+                  "manage": True},
+            k8gb={"install": "auto"}),
+         [
+             {"apiVersion": "helm.m.crossplane.io/v1beta1", "kind": "Release",
+              "metadata": {"annotations": {
+                  "crossplane.io/composition-resource-name": "k8gb-operator"}}},
+         ],
+         observed=[k8gb_operator_ready(),
+                   observed_gslb({"app.failover.example.test": "Healthy"},
+                                 healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])]),
+
+    # k8gb install with Route53 external-dns: the extdns block must gain the
+    # aws provider, domainFilters derived from dnsZones, and creds env from the
+    # configured secret. Domain is supplied via the claim, never hardcoded.
+    test("k8gb-install-route53-extdns",
+         xr("cp-a", MEMBER_A,
+            [MEMBER_A, {"id": "cp-b", "provider": "aws", "region": "eu-west-1",
+                        "geoTag": "eu", "priority": 2}],
+            gslb={"hostname": "failover.gslb.example.test", "strategy": "failover"},
+            k8gb={"install": "always", "version": "v0.15.0",
+                  "dnsProvider": "aws",
+                  "extdnsCredentialsSecretName": "extdns-aws",
+                  "dnsZones": [{"parentZone": "gslb.example.test",
+                                "loadBalancedZone": "failover.gslb.example.test",
+                                "negTTL": 30}]}),
+         [
+             {"apiVersion": "helm.m.crossplane.io/v1beta1", "kind": "Release",
+              "metadata": {"annotations": {
+                  "crossplane.io/composition-resource-name": "k8gb-operator"}},
+              "spec": {"forProvider": {"values": {"extdns": {
+                  "provider": {"name": "aws"},
+                  "domainFilters": ["gslb.example.test"]}}}}},
+         ]),
+
+    # Claim creates the Gslb once the k8gb operator Release is observed Ready
+    # (single-claim GSLB signal). Demo backend rendered too. Domain from claim.
+    test("gslb-created-when-operator-ready",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.failover.example.test", "strategy": "failover",
+                  "manage": True, "demoApp": True}),
+         [
+             {"apiVersion": "k8gb.absa.oss/v1beta1", "kind": "Gslb",
+              "metadata": {"annotations": {
+                  "crossplane.io/composition-resource-name": "gslb-app"}},
+              "spec": {"strategy": {"type": "failover", "primaryGeoTag": "us"}}},
+             {"apiVersion": "v1", "kind": "Service",
+              "metadata": {"annotations": {
+                  "crossplane.io/composition-resource-name": "gslb-demo-svc"}}},
+         ],
+         observed=[k8gb_operator_ready()]),
+
+    # Gslb is NOT created before k8gb is ready (no operator Release observed) ->
+    # avoids applying a Gslb before its CRD exists.
+    test("gslb-not-created-before-k8gb-ready",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.failover.example.test", "strategy": "failover",
+                  "manage": True}),
+         [assert_role("leader")]),
+
+    # The composition's OWN Gslb (observed composed resource) drives the
+    # election: serviceHealth Unhealthy read back from observed -> step down.
+    # Regression guard for the extra-resources-empty bug found in live testing.
+    test("gslb-unhealthy-from-composed-observed",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.failover.example.test", "strategy": "failover",
+                  "manage": True, "demoApp": True}),
+         [assert_role("standby")],
+         observed=[k8gb_operator_ready(),
+                   observed_gslb({"app.failover.example.test": "Unhealthy"},
+                                 healthy_ips=[], exposed_ips=["1.2.3.4"])]),
+
+    # --- GSLB is the PRIMARY signal (found=True path; Tests 1&2 never hit this).
+    # A Gslb present, healthy, and active (this cluster's exposed IPs are in the
+    # healthy DNS records) -> leader, even alone.
+    test("gslb-healthy-active-leader",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "failover"}),
+         [assert_role("leader")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])),
+
+    # Gslb present but UNHEALTHY -> step down to standby even with no peer.
+    # This is the failure signal the design is built around.
+    test("gslb-unhealthy-standby",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "failover"}),
+         [assert_role("standby")],
+         context=gslb_context({"app.cloud.example.com": "Unhealthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=[], exposed_ips=["1.2.3.4"])),
+
+    # Gslb healthy but this cluster is NOT the serving geo (exposed IPs absent
+    # from the healthy records) -> not active -> standby (failover/passive geo).
+    test("gslb-healthy-not-active-standby",
+         xr("cp-a", MEMBER_A, [MEMBER_A],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "failover"}),
+         [assert_role("standby")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["9.9.9.9"], exposed_ips=["1.2.3.4"])),
 ]
 
 output = {"items": [t.model_dump(by_alias=True, exclude_none=True) for t in tests]}

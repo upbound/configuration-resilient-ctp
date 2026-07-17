@@ -1,0 +1,28 @@
+# One-time platform prerequisite (applied by the control-plane blueprint, NOT
+# by end users). Grants the Crossplane composite controller rights to manage the
+# k8gb Gslb (and external-dns DNSEndpoint) resources that the ResilientControlPlane
+# composition creates directly. Scoped to exactly those APIs — not cluster-admin.
+#
+# This is the ONLY extra RBAC the Gslb-creation path needs; ideally it is folded
+# into configuration-aws-ctp (or the Space blueprint) so operators/users never
+# apply it by hand. Ships here as an example for clusters not yet doing that.
+#
+# Uses RBAC AGGREGATION (the documented Crossplane form): the aggregate label
+# folds these rules into Crossplane's primary ClusterRole, which is already
+# bound to the crossplane service account — so no separate ClusterRoleBinding is
+# needed and the grant stays scoped to exactly the k8gb/external-dns APIs.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-k8gb-access
+  labels:
+    app.kubernetes.io/part-of: configuration-resilient-ctp
+    rbac.crossplane.io/aggregate-to-crossplane: "true"
+rules:
+  - apiGroups: ["k8gb.absa.oss"]
+    resources: ["gslbs", "gslbs/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["externaldns.k8s.io"]
+    resources: ["dnsendpoints", "dnsendpoints/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

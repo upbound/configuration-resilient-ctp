@@ -48,7 +48,7 @@ spec:
   # heartbeat resource; peers observe it. A peer older than freshnessTTLSeconds
   # is considered down. Keep TTL comfortably above the provider observe lag.
   heartbeat:
-    tagKey: last-reconciliation-timestamp-utc
+    livenessKey: last-reconciliation-timestamp-utc
     freshnessTTLSeconds: 180
     writeThrottleSeconds: 60
   # How the leadership decision reaches workload resources. `convention`:

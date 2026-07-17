@@ -58,11 +58,22 @@ def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
             + ("" if gslb.found else ", no Gslb found") + ")"
         )
 
-    # (3) Are all higher-priority peers not-alive?
-    higher_all_down = all(not p.fresh for p in higher)
+    # (3) Are all higher-priority peers CONFIRMED down? A peer blocks promotion
+    # unless it is readable AND stale (confirmed dead). An UNREADABLE peer
+    # (direct read failed / observe not yet synced) is treated as possibly-alive
+    # and also blocks — we never promote on our own blindness (fail-safe: an
+    # unknown higher peer must not be interpreted as "down").
+    higher_all_down = all(p.readable and not p.fresh for p in higher)
     if higher and not higher_all_down:
-        alive = [p.cp_id for p in higher if p.fresh]
-        reasons.append(f"higher-priority peer(s) alive: {alive}")
+        alive = [p.cp_id for p in higher if p.readable and p.fresh]
+        unknown = [p.cp_id for p in higher if not p.readable]
+        if alive:
+            reasons.append(f"higher-priority peer(s) alive: {alive}")
+        if unknown:
+            reasons.append(
+                f"higher-priority peer(s) unreadable, holding standby "
+                f"(fail-safe): {unknown}"
+            )
 
     want_leader = self_eligible and higher_all_down
     candidate_since = 0

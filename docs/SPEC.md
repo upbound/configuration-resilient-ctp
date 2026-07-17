@@ -207,7 +207,7 @@ spec:
     logLevel: info
     # clusterGeoTag / extGslbClustersGeoTags are derived from spec.identity.geoTag + spec.members
   heartbeat:
-    tagKey: last-reconciliation-timestamp-utc
+    livenessKey: last-reconciliation-timestamp-utc
     freshnessTTLSeconds: 180
     writeThrottleSeconds: 60
     # resource type is derived from identity.provider
@@ -356,6 +356,22 @@ intent** (`[Create, Update, Observe]`) on the bucket:
    heartbeat resources, or — better long term — observe peers via **provider-kubernetes**
    (a watch-based Kubernetes heartbeat CR on each control plane) instead of cloud-tag
    polling. Set `heartbeat.freshnessTTLSeconds` comfortably above the effective observe lag.
+
+   **⚠️ Changing the provider `--poll` can itself cause adverse behavior unless the
+   failover timers are re-aligned with it.** The safe relationship is
+   `freshnessTTLSeconds > poll + writeThrottleSeconds + margin`, and failover detection
+   latency ≈ `freshnessTTLSeconds`. Consequences:
+   - Leaving the **default `--poll=10m`** with a small TTL (e.g. 180s) → an alive peer's
+     observed age (up to ~`poll + writeThrottle` ≈ 660s) is almost always > TTL →
+     **near-permanent split-brain** (both promote). Confirmed live.
+   - **Raising** `--poll` without raising TTL → same false-down / split-brain.
+   - **Lowering** `--poll` (as Test 1 did) makes detection fast but multiplies API
+     calls/cost across *all* of that provider's MRs — not a realistic default.
+   - Regular users will not tune `--poll`. Therefore the cloud-resource heartbeat must be
+     treated as the **slow confirmation** term, and the fast, poll-independent failure
+     signal must come from **GSLB/k8gb health checks** or the **DNS heartbeat backend**
+     (freshness read directly in the function via public DNS, bounded by DNS TTL + function
+     reconcile, not provider poll). Do not design failover to depend on a tuned `--poll`.
 4. **Cross-package signal fetch:** the workload package reads the RCP's
    `status.managementPolicy` via `function-extra-resources` with a **`Selector`,
    `minMatch: 0`** (optional/fail-safe: absent RCP → `Observe`, never a fatal). A

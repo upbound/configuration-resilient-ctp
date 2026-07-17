@@ -1,0 +1,57 @@
+# One-time platform prerequisite for the k8gb auto-install path (k8gb.install:
+# auto/always). provider-helm must install arbitrary cluster-scoped resources
+# (k8gb CRDs, ClusterRoles, Deployments), which needs broad RBAC. A Crossplane
+# package CANNOT grant itself cluster-admin (Kubernetes' privilege-escalation
+# guard), so this bootstrap is applied ONCE by the control-plane blueprint —
+# ideally folded into configuration-aws-ctp / the Space so operators and end
+# users never apply it by hand. End users still only apply a ResilientControlPlane.
+#
+# Applying this Provider (with a stable service-account name via
+# DeploymentRuntimeConfig) BEFORE the configuration also satisfies the package's
+# provider-helm dependency, so the cluster-admin binding targets a predictable
+# SA name that survives provider version bumps.
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-helm
+spec:
+  package: xpkg.upbound.io/upbound/provider-helm:v1.3.0
+  runtimeConfigRef:
+    apiVersion: pkg.crossplane.io/v1beta1
+    kind: DeploymentRuntimeConfig
+    name: provider-helm
+---
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: provider-helm
+spec:
+  serviceAccountTemplate:
+    metadata:
+      name: provider-helm
+---
+# Broad rights so Helm can install the k8gb chart's cluster-scoped resources.
+# Scope this down to k8gb's specific needs if your policy requires it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: provider-helm-k8gb-install
+subjects:
+  - kind: ServiceAccount
+    name: provider-helm
+    namespace: crossplane-system
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# In-cluster Helm ProviderConfig referenced by the composition's Releases.
+apiVersion: helm.m.crossplane.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+  namespace: default
+spec:
+  credentials:
+    source: InjectedIdentity

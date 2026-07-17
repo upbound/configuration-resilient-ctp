@@ -114,22 +114,75 @@ spec:
                         - roundRobin
                         - geoip
                       default: failover
+                    manage:
+                      type: boolean
+                      description: >-
+                        Whether the composition CREATES the k8gb Gslb for this
+                        hostname (default true), so a single claim yields a
+                        working GSLB signal. Set false to consume a Gslb you
+                        manage yourself. The Gslb is only created once k8gb is
+                        ready (its CRD exists).
+                      default: true
+                    ingressClassName:
+                      type: string
+                      description: Ingress class for the Gslb-managed ingress
+                      default: nginx
+                    backendServiceName:
+                      type: string
+                      description: >-
+                        Name of the in-cluster Service the Gslb ingress routes
+                        to (your workload). Ignored when demoApp is true.
+                      default: app
+                    demoApp:
+                      type: boolean
+                      description: >-
+                        Render a tiny nginx Deployment+Service behind the Gslb so
+                        k8gb has a real endpoint to health-check. Intended for
+                        onboarding/tests; scaling it to zero drives a live GSLB
+                        health failure.
+                      default: false
                 k8gb:
                   type: object
                   description: Optional k8gb installation configuration
                   properties:
                     install:
                       type: string
-                      description: Whether to install k8gb operator
+                      description: >-
+                        Whether the composition installs the k8gb operator.
+                        "auto" (default) installs it only if not already present,
+                        so a single claim brings up GSLB with no manual steps;
+                        "never" relies on heartbeat + priority alone; "always"
+                        forces install.
                       enum:
                         - never
                         - auto
                         - always
-                      default: never
+                      default: auto
                     version:
                       type: string
                       description: k8gb version to install
                       default: v0.15.0
+                    dnsProvider:
+                      type: string
+                      description: >-
+                        external-dns provider for publishing the load-balanced
+                        zone records (e.g. "aws" for Route53). When empty,
+                        external-dns is left provider-agnostic (no cloud DNS
+                        integration).
+                      enum:
+                        - ""
+                        - aws
+                        - azure
+                        - google
+                        - cloudflare
+                      default: ""
+                    extdnsCredentialsSecretName:
+                      type: string
+                      description: >-
+                        Name of a Secret (in the k8gb namespace) holding the
+                        external-dns provider credentials. For aws/Route53 it
+                        must contain keys access_key_id, secret_access_key and
+                        (optionally) session_token.
                     dnsZones:
                       type: array
                       description: DNS zones for k8gb
@@ -171,9 +224,27 @@ spec:
                   type: object
                   description: Heartbeat mechanism configuration
                   properties:
-                    tagKey:
+                    read:
                       type: string
-                      description: Tag/label key for heartbeat timestamp
+                      description: >-
+                        How peer heartbeats are READ. "mr" (default) reads the
+                        provider-observed Observe MR, which is gated by the
+                        provider --poll interval (10m default) and can cause
+                        false-stale/split-brain unless freshnessTTLSeconds is
+                        set above the poll. "directApi" reads the peer's cloud
+                        resource directly in-function (seconds-fresh, no --poll
+                        dependency); requires cloud read credentials on the
+                        control plane. The WRITE path is unchanged either way.
+                      enum:
+                        - mr
+                        - directApi
+                      default: mr
+                    livenessKey:
+                      type: string
+                      description: >-
+                        Key under which each control plane stamps its last-reconcile
+                        epoch — the liveness marker peers read to judge freshness.
+                        Written as a tag on AWS/Azure and a label on GCP.
                       default: last-reconciliation-timestamp-utc
                     freshnessTTLSeconds:
                       type: integer

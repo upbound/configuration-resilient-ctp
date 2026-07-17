@@ -203,6 +203,45 @@ def build_peer_observe(member: dict, namespace: str, default_provider_config: st
     return name, res
 
 
+def read_peer_direct(member: dict, ts_tag: str, now: int, ttl: int, *,
+                     credential=None) -> PeerLiveness:
+    """Read a peer's liveness by calling the cloud API DIRECTLY, bypassing the
+    provider observe-poll (docs/SPEC.md §Gotchas/3). Returns freshness within
+    seconds instead of up to ``--poll`` (10m). Account/project/subscription
+    scoping comes from the credentials (never an API input).
+
+    Fail-safe: any read failure (auth/network/throttle/not-found) or a resource
+    that carries no timestamp tag yields ``readable=False``, which the election
+    treats as "peer unknown -> do NOT promote". A transient read miss must never
+    be read as "peer down"."""
+    from . import cloud_read
+    cp_id = member["id"]
+    resource_name = heartbeat_external_name(cp_id)
+    try:
+        tags = cloud_read.read_resource_tags(
+            member["provider"], resource_name,
+            region=member.get("region", ""), credential=credential,
+        )
+    except cloud_read.CloudReadError:
+        tags = None  # unknown -> unreadable -> blocks promotion (fail-safe)
+
+    raw_ts = tags.get(ts_tag) if tags is not None else None
+    readable = raw_ts is not None
+    epoch = as_int(raw_ts, 0)
+    age = now - epoch if epoch else 10 ** 9
+    fresh = readable and epoch > 0 and age <= ttl
+    return PeerLiveness(
+        cp_id=cp_id,
+        priority=int(member["priority"]),
+        geo_tag=member.get("geoTag", ""),
+        epoch=epoch,
+        age_seconds=age,
+        fresh=fresh,
+        readable=readable,
+        role=(tags.get(ROLE_TAG, "") or "") if tags is not None else "",
+    )
+
+
 def read_peer(member: dict, observed: dict, ts_tag: str, now: int,
               ttl: int) -> PeerLiveness:
     """Read a peer's liveness from its observed heartbeat resource's

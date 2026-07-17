@@ -17,7 +17,7 @@ Module layout mirrors configuration-aws-ctp: a flat function directory with a
 
 from crossplane.function import resource, response
 
-from . import election, gslb, heartbeat, k8gb_install, status
+from . import election, gslb, gslb_build, heartbeat, k8gb_install, status
 from .prelude import ROLE_TAG, SELF_HB, TS_TAG_DEFAULT, as_int, now_epoch
 
 EXTRA_RESOURCES_KEY = "apiextensions.crossplane.io/extra-resources"
@@ -45,12 +45,16 @@ def _compose(req, rsp):
 
     namespace = xr.get("metadata", {}).get("namespace", "default")
     provider_config = spec.get("providerConfigName", "default")
-    ts_tag = hb_cfg.get("tagKey", TS_TAG_DEFAULT)
+    ts_tag = hb_cfg.get("livenessKey", TS_TAG_DEFAULT)
     ttl = int(hb_cfg.get("freshnessTTLSeconds", 180))
     throttle = int(hb_cfg.get("writeThrottleSeconds", 60))
-    # Provider account/project scoping comes from each provider's ProviderConfig,
-    # never from this API (the GCP project defaults from the ProviderConfig's
-    # projectID, like the AWS account is implicit in the credentials).
+    # Provider account/project/subscription scoping comes entirely from each
+    # provider's ProviderConfig/credentials — never from this API. The heartbeat
+    # spec is fully provider-agnostic.
+    # Peer-read mode: "mr" (default) reads the provider-observed Observe MR
+    # (poll-gated); "directApi" reads the cloud API in-function (seconds-fresh,
+    # no --poll dependency). The WRITE path is unchanged in both modes.
+    read_mode = hb_cfg.get("read", "mr")
     hysteresis = int(failback_cfg.get("hysteresisPeriods", 3))
     now = now_epoch()
 
@@ -59,17 +63,31 @@ def _compose(req, rsp):
         for name, r in req.observed.resources.items()
     }
 
-    # 1. GSLB signal from fetched Gslb resources.
+    # 1. GSLB signal. Read the Gslb from BOTH sources: any externally-managed
+    # Gslbs fetched via function-extra-resources (context "gslbs"), AND the Gslb
+    # this composition creates itself, whose observed status arrives in
+    # observed.resources (like the reference package, which reads serviceHealth
+    # from observed composed resources). The composed Gslb is authoritative and
+    # reliable — the extra-resources fetch can be empty for a namespaced Gslb.
     ctx = resource.struct_to_dict(req.context)
-    gslbs = (ctx.get(EXTRA_RESOURCES_KEY, {}) or {}).get("gslbs", []) or []
+    gslbs = list((ctx.get(EXTRA_RESOURCES_KEY, {}) or {}).get("gslbs", []) or [])
+    composed_gslb = observed.get(gslb_build.GSLB_RESOURCE)
+    if composed_gslb and composed_gslb.get("kind") == "Gslb":
+        gslbs.append(composed_gslb)
     gslb_signal = gslb.evaluate(gslbs, gslb_cfg.get("hostname", ""),
                                 gslb_cfg.get("strategy", "failover"))
 
-    # 2. Peers' liveness (exclude self by id).
-    peers = [
-        heartbeat.read_peer(m, observed, ts_tag, now, ttl)
-        for m in members if m.get("id") != identity["id"]
-    ]
+    # 2. Peers' liveness (exclude self by id). In directApi mode read each peer
+    # straight from the cloud API (seconds-fresh); otherwise from the polled MR.
+    peer_members = [m for m in members if m.get("id") != identity["id"]]
+    if read_mode == "directApi":
+        peers = [
+            heartbeat.read_peer_direct(m, ts_tag, now, ttl)
+            for m in peer_members
+        ]
+    else:
+        peers = [heartbeat.read_peer(m, observed, ts_tag, now, ttl)
+                 for m in peer_members]
 
     # 3. Decide.
     decision = election.decide(
@@ -105,15 +123,36 @@ def _compose(req, rsp):
                                                  ts_tag)
         resource.update(rsp.desired.resources[name], res)
 
-    # 5. Optional k8gb install.
-    install_mode = k8gb_cfg.get("install", "never")
-    if k8gb_install.should_install(install_mode, k8gb_present=gslb_signal.found):
+    # 5. Optional k8gb install. Keep it installed once we've installed it
+    # (operator Release observed) — never uninstall just because our own Gslb
+    # now exists, which would remove the CRD and deadlock the XR.
+    install_mode = k8gb_cfg.get("install", "auto")
+    operator_installed = bool(observed.get(k8gb_install.K8GB_OPERATOR))
+    if k8gb_install.should_install(install_mode, gslb_signal.found,
+                                   operator_installed=operator_installed):
         helm_pc = k8gb_cfg.get("helmProviderConfigName", "default")
         for name, res in k8gb_install.build(identity, members, k8gb_cfg,
                                             namespace, helm_pc):
+            resource.update(rsp.desired.resources[name], res)
+
+    # 5b. Optionally create the Gslb (single-claim GSLB signal). Gated on k8gb
+    # being READY (operator Release Ready, so its CRD exists) or a Gslb already
+    # present — never emit a Gslb before its CRD (operational guard #1).
+    k8gb_ready = _release_ready(observed.get(k8gb_install.K8GB_OPERATOR, {}))
+    if gslb_build.should_manage(gslb_cfg, k8gb_ready, gslb_signal.found):
+        for name, res in gslb_build.build(identity, members, gslb_cfg, namespace):
             resource.update(rsp.desired.resources[name], res)
 
     # 6. Status writeback (status.managementPolicy is the convention contract).
     st = status.build_status(decision=decision, gslb=gslb_signal, peers=peers,
                              self_epoch=epoch_to_write)
     rsp.desired.composite.resource.update({"status": st})
+
+
+def _release_ready(observed_release: dict) -> bool:
+    """True if an observed provider-helm Release reports Ready=True. Used to
+    confirm k8gb's operator (and thus its CRDs) is installed before creating a
+    Gslb."""
+    conds = (observed_release.get("status", {}) or {}).get("conditions", []) or []
+    return any(c.get("type") == "Ready" and c.get("status") == "True"
+               for c in conds)
