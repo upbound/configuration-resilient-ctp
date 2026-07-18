@@ -108,7 +108,16 @@ spec:
                       description: The GSLB record whose health is watched
                     strategy:
                       type: string
-                      description: k8gb load balancing strategy
+                      description: >-
+                        k8gb load-balancing strategy for WORKLOAD TRAFFIC (the
+                        data plane): "failover" serves one geo at a time;
+                        "roundRobin"/"geoip" serve multiple geos simultaneously
+                        ("active-active" traffic). This affects traffic
+                        distribution ONLY. It never changes control-plane
+                        leadership: the set always has exactly ONE management
+                        leader (managementPolicies ["*"]) with all others at
+                        ["Observe"], in every strategy. All control planes receive
+                        the same claims/XRs; only the leader reconciles them.
                       enum:
                         - failover
                         - roundRobin
@@ -233,8 +242,13 @@ spec:
                         false-stale/split-brain unless freshnessTTLSeconds is
                         set above the poll. "directApi" reads the peer's cloud
                         resource directly in-function (seconds-fresh, no --poll
-                        dependency); requires cloud read credentials on the
-                        control plane. The WRITE path is unchanged either way.
+                        dependency). PREREQUISITE: the composition function pod
+                        must have read-only credentials for every peer's cloud,
+                        wired via a pre-created Function + DeploymentRuntimeConfig
+                        (see examples/directapi-heartbeat.yaml). Without them the
+                        direct read fails and the peer is treated as unreadable,
+                        holding this CP at standby (fail-safe). The WRITE path is
+                        unchanged either way.
                       enum:
                         - mr
                         - directApi

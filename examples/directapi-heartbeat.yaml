@@ -1,0 +1,94 @@
+# Opt-in prerequisite for spec.heartbeat.read: directApi
+# =====================================================================
+# In directApi mode the resilience composition function reads each peer's
+# heartbeat STRAIGHT from the peer's cloud API (seconds-fresh), bypassing the
+# provider observe-poll (--poll=10m default) that otherwise makes a live peer
+# look stale and blocks/mis-drives failover. To do that, the FUNCTION POD needs
+# read-only credentials for every peer's cloud.
+#
+# The resilience function is a package dependency of this Configuration (up build
+# emits it as its own Function image and pins it in the Configuration's
+# dependsOn). A Function only mounts credentials via spec.runtimeConfigRef, and
+# hand-patching the auto-created Function gets reconciled away by the package
+# manager. So we PRE-CREATE the Function object (same name the package resolves,
+# carrying a runtimeConfigRef) BEFORE the Configuration installs — the package
+# manager then ADOPTS it instead of creating its own, exactly like the
+# provider-helm bootstrap in providerconfig-helm.yaml.
+#
+# ORDER: apply this file (or its objects) BEFORE / alongside the Configuration.
+# Apply on EVERY control plane in the set; point each one's credentials at the
+# OTHER members' clouds/regions.
+#
+# ⚠️ DIGEST RE-PIN (per-release manual step): the Configuration pins its function
+# dependency to an immutable sha256 digest, so spec.package below MUST reference
+# the digest that ships with the Configuration version you install. Re-pin it on
+# every Configuration upgrade. Find the digest with:
+#   crossplane xpkg dependencies xpkg.upbound.io/upbound/configuration-resilient-ctp:<ver>
+# (or read package.yaml's dependsOn in the pulled Configuration image).
+---
+# The runtime config that gives the function pod a stable ServiceAccount and,
+# preferred, an ambient cloud identity (IRSA / Workload Identity) that the SDK
+# default credential chains pick up with NO static keys. AWS shown; see the
+# per-cloud notes at the bottom for Azure / GCP.
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: resilient-ctp-fn
+spec:
+  serviceAccountTemplate:
+    metadata:
+      name: resilient-ctp-fn
+      annotations:
+        # EKS pod-identity webhook injects AWS_ROLE_ARN + a projected web-identity
+        # token that boto3's default chain resolves — no access keys in-cluster.
+        eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/resilient-ctp-hb-reader
+---
+# Pre-created resilience Function, adopted by the Configuration's dependency.
+# The name is the exact package-derived name the composition calls
+# (apis/resilientcontrolplane/composition.yaml step "resilience").
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: upbound-configuration-resilient-ctpresilientcontrolplane
+spec:
+  # Re-pin @sha256:... to match the installed Configuration release (see header).
+  package: xpkg.upbound.io/upbound/configuration-resilient-ctp_resilientcontrolplane@sha256:<DIGEST>
+  runtimeConfigRef:
+    apiVersion: pkg.crossplane.io/v1beta1
+    kind: DeploymentRuntimeConfig
+    name: resilient-ctp-fn
+---
+# Finally, the claim opts into directApi. (Only heartbeat.read changes; the rest
+# of the ResilientControlPlane spec is unchanged.)
+apiVersion: resilient.platform.upbound.io/v1alpha1
+kind: ResilientControlPlane
+metadata:
+  name: use1
+  namespace: default
+spec:
+  heartbeat:
+    read: directApi
+  # ... identity / members / gslb as in resilientcontrolplane-simple.yaml ...
+#
+# =====================================================================
+# LEAST-PRIVILEGE per cloud (the function only READS a tag/label; it never reads
+# the secret value nor mutates anything):
+#
+#   AWS   — action: ssm:ListTagsForResource ONLY
+#           resource: arn:aws:ssm:<peer-region>:<acct>:parameter/recon-heartbeat-*
+#           (cross-account: an assumable read-only role or a resource grant.)
+#
+#   Azure — role: Reader (Microsoft.Resources/subscriptions/resourceGroups/read)
+#           scope: the peer resource group(s).
+#           The pod also needs AZURE_SUBSCRIPTION_ID in its env; prefer a
+#           federated Workload Identity (AZURE_CLIENT_ID + projected token) so
+#           DefaultAzureCredential resolves with no static secret.
+#
+#   GCP   — permission: storage.buckets.get (roles/storage.bucketViewer or a
+#           custom role) on the peer bucket(s). Prefer GKE Workload Identity /
+#           ADC over a mounted key file.
+#
+# Static-key fallback (avoid): mount a Secret into the pod as the SDK's standard
+# env (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, etc.) via the
+# DeploymentRuntimeConfig's deploymentTemplate. Ambient identity is strongly
+# preferred.

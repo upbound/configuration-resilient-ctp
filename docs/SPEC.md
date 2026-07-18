@@ -155,11 +155,21 @@ unhealthy. Otherwise: **stay `["Observe"]`.**
   primary).
 
 ### 6.1 Strategy-dependence of the GSLB term
+
+**Single management leader is invariant across ALL strategies.** The strategy only
+changes *how workload traffic is distributed* (data plane); it never permits more
+than one control plane at `["*"]`. "Active-active" is a data-plane property
+(multiple geos serve app traffic at once); it is NOT active-active management. All
+CPs receive the same XRs/claims, exactly one reconciles them as leader, the rest
+`Observe`. Two management leaders is split-brain and is never allowed. (See
+docs/DESIGN-NOTES.md §6.)
+
 - **`failover` strategy (Tests 1–2):** GSLB yields exclusive activeness (one `primaryGeoTag`), so
   term (1) already implies most of the exclusivity; priority+heartbeat break residual ties.
-- **`roundRobin`/`geoip` strategy (Test 3, active-active):** GSLB marks *all* healthy geos active,
-  so term (1) degrades to a pure **health** check and **exclusivity is carried entirely by
-  priority + heartbeat**. The rule above is written to work identically in both modes.
+- **`roundRobin`/`geoip` strategy (Test 3, active-active *traffic*):** GSLB marks *all* healthy geos
+  active for traffic, so term (1) degrades to a pure **health** check and **single-leader
+  exclusivity is carried entirely by priority + heartbeat**. The rule above is written to work
+  identically in both modes — still exactly one leader.
 
 ## 7. Failover & failback
 
@@ -282,15 +292,29 @@ each hold this XR with the **same deterministic `crossplane.io/external-name`** 
 
 ## 11. Credential / read-access model
 
-Per CP, to read a peer's heartbeat tag it needs, for the peer's cloud/region: the **provider
-package**, a **ProviderConfig + credential** with *read-tags* permission on the heartbeat resource,
-and an **`Observe` MR** pointed at the derived coordinates.
+Per CP, to read a peer's heartbeat it needs, for the peer's cloud/region, read-only access to the
+peer's heartbeat resource. There are two read paths:
+
+- **`heartbeat.read: mr` (default)** — a **provider package** + **ProviderConfig + credential** with
+  *read-tags* permission and an **`Observe` MR** pointed at the derived coordinates. Gated by the
+  provider observe-poll (`--poll=10m` default).
+- **`heartbeat.read: directApi`** — the composition **function pod** reads the peer's cloud API
+  directly (seconds-fresh). Needs read creds on the pod (pre-created Function + DeploymentRuntimeConfig;
+  see `examples/directapi-heartbeat.yaml`) and the cloud SDKs shipped in the function image.
+
+The reader calls **exactly one tag/label read** per cloud (never reads the secret value):
+
+| Cloud | API call the function makes | Minimum permission |
+|---|---|---|
+| AWS | `ssm:ListTagsForResource` on `parameter/recon-heartbeat-*` | `ssm:ListTagsForResource` only (NOT `GetParameters`/`GetParameter`) |
+| Azure | `resource_groups.get(<rg>)` | `Microsoft.Resources/subscriptions/resourceGroups/read` (built-in **Reader**) + `AZURE_SUBSCRIPTION_ID` |
+| GCP | `storage.get_bucket(<bucket>)` | `storage.buckets.get` (**roles/storage.bucketViewer**) |
 
 | Scenario | Cross-CP read requirement |
 |---|---|
-| Test 1 — 2×AWS, same account | one AWS credential w/ `ssm:GetParameters`+`tag:GetResources`; region per MR. Trivial. |
+| Test 1 — 2×AWS, same account | one AWS credential w/ `ssm:ListTagsForResource` on the heartbeat parameters; region per MR/member. Trivial. |
 | 2×AWS, different accounts | resource policy or shared read-only assumable role. |
-| Test 2/3 — cross-cloud | each CP holds *both/all* providers + a **least-privilege** read cred scoped (by name convention / dedicated container) to the peer heartbeat resources only. |
+| Test 2/3 — cross-cloud | each CP holds *both/all* providers (mr) or the peer-cloud SDKs+creds (directApi), a **least-privilege** read cred scoped (by name convention) to the peer heartbeat resources only. |
 
 ## 12. Assumptions, dependencies, risks
 

@@ -145,14 +145,40 @@ The `Gslb` is a non-managed resource, so — like other non-MR side effects
 resource. Only the shared managed resources are governed by the leader/standby
 policy.
 
-## 6. Single leader at all times
+## 6. Single leader at all times — in EVERY scenario, EVERY strategy
 
-Across every topology (2×AWS, AWS+Azure, tri-cloud) the invariant is exactly one
-**primary/reconciling** control plane at a time. Multiple standbys are fine;
-they must never be promoted simultaneously. Priority ordering + the two-factor
-AND rule (GSLB-eligible AND heartbeat-fresh AND no higher-priority peer alive)
-enforce this, and the election fail-safe treats an *unreadable* higher-priority
-peer as "possibly alive → stay standby" — it never promotes on its own
-blindness. GSLB is the fast, poll-independent failure trigger; the cross-CP
-heartbeat is the slower confirmation term (see docs/SPEC.md §Gotchas on the
-provider observe-poll vs. freshness-TTL relationship).
+**Invariant (non-negotiable): a resilience set has exactly ONE management leader
+at any instant.** Across every topology (2×AWS, AWS+Azure, tri-cloud) and every
+k8gb strategy (`failover`, `roundRobin`, `geoip`), exactly one control plane
+holds `managementPolicies: ["*"]` over the shared managed resources; all others
+are reduced to `["Observe"]`. Multiple standbys/followers are fine — they must
+**never** be promoted simultaneously. Two management leaders reconciling the same
+managed resources is the split-brain this entire design exists to prevent.
+
+**"Active-active" is a DATA-PLANE term, not a leadership term.** It is a common
+source of confusion, so state it plainly:
+
+- **Data plane (workload traffic).** k8gb `failover` sends app traffic to one geo
+  at a time; `roundRobin`/`geoip` send it to *several geos simultaneously*. That
+  simultaneous traffic distribution is what "active-active" means.
+- **Control-plane management.** Independent of the above. All CPs in the set
+  receive the same XRs/claims, but only the single leader reconciles them
+  (`["*"]`); followers hold `["Observe"]`.
+
+So "active-active" = **1 management leader + 1..N followers, all receiving the
+same requests, with multiple geos serving app traffic**. It does NOT mean
+multiple management leaders — that is never permitted.
+
+**How the single leader is enforced.** Priority ordering + the two-factor rule.
+The higher-peer promotion gate (functions/…/election.py) blocks a lower-priority
+CP unless every higher-priority peer is positively not-leading: an *unreadable*
+higher peer holds it at standby (fail-safe — never promote on our own
+blindness); a fresh higher peer still advertising `role=leader` holds it (the
+independent heartbeat is the partition tie-breaker); only a stepped-down
+(`role=standby`) higher peer that GSLB has arbitrated away in `failover` mode, or
+a stale/dead higher peer, clears the gate. GSLB is the fast, poll-independent
+failure trigger; the cross-CP heartbeat is the slower confirmation term (see
+docs/SPEC.md §Gotchas on the provider observe-poll vs. freshness-TTL
+relationship). In `roundRobin`/`geoip` GSLB gives no exclusivity (all healthy
+geos are "active"), so leadership rests **entirely** on priority + heartbeat —
+still exactly one leader.

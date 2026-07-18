@@ -8,21 +8,39 @@ Decides whether THIS control plane should hold ``managementPolicies: ["*"]``
 3. peers' liveness + advertised role, read from their heartbeat tags.
 
 Core rule (docs/SPEC.md §6): hold ``["*"]`` iff GSLB-healthy AND GSLB-active
-(strategy-aware) AND no higher-priority peer is alive. Never fail open: any
+(strategy-aware) AND no higher-priority peer blocks. Never fail open: any
 ambiguity resolves to ``["Observe"]``.
+
+Higher-peer gate (the two-factor tie-breaker). A higher-priority peer blocks
+promotion unless we can positively conclude it is not leading:
+- **unreadable** -> block (fail-safe: never promote on our own blindness).
+- **readable + stale** -> down; does not block.
+- **readable + fresh + role==leader** -> block. The peer still advertises
+  leadership and its *heartbeat* is the independent partition tie-breaker: in a
+  gray failure that partitions only the health-check plane, both geos self-
+  compute GSLB-active locally, so the intact heartbeat is what prevents a double
+  leader (the AND of the two signals breaks the tie).
+- **readable + fresh + role!=leader** -> block UNLESS we are the sole active geo
+  under ``failover`` strategy (``gslb_active_failover``); then the higher peer has
+  stepped down for an app-health failover and we may promote (this is the #29
+  fix). Without that independent single-active arbitration (permissive / no-GSLB
+  / roundRobin / geoip) a fresh higher peer always holds a lower one, role-
+  agnostic — the original conservative priority+heartbeat rule, unchanged.
 
 Safety mechanisms:
 - **Two-phase handoff (failback):** a recovering higher-priority CP will not
   seize ``["*"]`` while a lower-priority peer still advertises ``role=leader``;
   the current leader first observes the higher peer alive, demotes to standby,
   and only then does the higher peer promote. Guarantees <=1 leader.
-- **Failover hysteresis:** promoting into a gap left by a failed higher-priority
-  peer requires the "higher peers all down" condition to persist for
-  ``hysteresisPeriods * writeThrottleSeconds`` before the flip, damping flap.
+- **Failover hysteresis:** promoting into a gap left by a stepped-down/failed
+  higher-priority peer requires the "higher peers all down" condition to persist
+  for ``hysteresisPeriods * writeThrottleSeconds`` before the flip, damping flap.
 
-Known limitation (SPEC §6): with per-CP heartbeats a genuine network partition
-can still theoretically split-brain; priority + GSLB reduce but do not fully
-eliminate it. Test 1 exercises region-death failover, not partition.
+Known limitation (SPEC §6, §14.3): with per-CP heartbeats a genuine network
+partition can still theoretically split-brain if the provider observe-poll lag
+exceeds the hysteresis window (``poll < freshnessTTL``/window is required for
+correctness); priority + GSLB + the role/freshness tie-breaker reduce but do not
+fully eliminate it. Test 1 exercises region-death/app-health failover.
 """
 
 from dataclasses import dataclass, field
@@ -39,7 +57,8 @@ class Decision:
 
 
 def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
-           hysteresis_periods: int, write_throttle: int, now: int) -> Decision:
+           hysteresis_periods: int, write_throttle: int, now: int,
+           strategy: str = "failover") -> Decision:
     my_priority = int(identity["priority"])
     higher = [p for p in peers if p.priority < my_priority]
     lower = [p for p in peers if p.priority > my_priority]
@@ -58,21 +77,40 @@ def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
             + ("" if gslb.found else ", no Gslb found") + ")"
         )
 
-    # (3) Are all higher-priority peers CONFIRMED down? A peer blocks promotion
-    # unless it is readable AND stale (confirmed dead). An UNREADABLE peer
-    # (direct read failed / observe not yet synced) is treated as possibly-alive
-    # and also blocks — we never promote on our own blindness (fail-safe: an
-    # unknown higher peer must not be interpreted as "down").
-    higher_all_down = all(p.readable and not p.fresh for p in higher)
-    if higher and not higher_all_down:
-        alive = [p.cp_id for p in higher if p.readable and p.fresh]
-        unknown = [p.cp_id for p in higher if not p.readable]
+    # (3) Which higher-priority peers block promotion? Single predicate (see the
+    # module docstring for the full rule). `gslb_active_failover` is the only
+    # thing that relaxes a fresh, stepped-down higher peer — and only in
+    # `failover` strategy, where GSLB makes exactly one geo active, so being
+    # active means the higher geo is NOT serving. The role==leader check is
+    # evaluated FIRST and holds even in that mode: it is the independent
+    # heartbeat tie-breaker for a health-check-plane-only partition.
+    gslb_active_failover = gslb.found and gslb.active and strategy == "failover"
+
+    def _blocks(peer):
+        if not peer.readable:
+            return "unreadable"          # fail-safe: never promote on blindness
+        if not peer.fresh:
+            return None                  # readable + stale => down
+        if peer.role == "leader":
+            return "leader-active"       # still leading => partition tie-breaker
+        if gslb_active_failover:
+            return None                  # stepped down + GSLB sole-active => #29
+        return "alive"                   # permissive: any fresh higher peer holds
+
+    blocking = [(peer, why) for peer in higher if (why := _blocks(peer))]
+    higher_all_down = not blocking
+    if blocking:
+        leading = [p.cp_id for p, why in blocking if why == "leader-active"]
+        alive = [p.cp_id for p, why in blocking if why == "alive"]
+        unreadable = [p.cp_id for p, why in blocking if why == "unreadable"]
+        if leading:
+            reasons.append(f"higher-priority leader(s) still active: {leading}")
         if alive:
             reasons.append(f"higher-priority peer(s) alive: {alive}")
-        if unknown:
+        if unreadable:
             reasons.append(
                 f"higher-priority peer(s) unreadable, holding standby "
-                f"(fail-safe): {unknown}"
+                f"(fail-safe): {unreadable}"
             )
 
     want_leader = self_eligible and higher_all_down
@@ -108,7 +146,7 @@ def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
     mgmt = ["*"] if want_leader else ["Observe"]
 
     if want_leader and not reasons:
-        reasons.append("GSLB healthy+active and no higher-priority peer alive")
+        reasons.append("GSLB healthy+active and no higher-priority peer blocking")
     if not want_leader and role == "standby" and not reasons:
         reasons.append("standby")
 

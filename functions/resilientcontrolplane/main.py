@@ -74,8 +74,8 @@ def _compose(req, rsp):
     composed_gslb = observed.get(gslb_build.GSLB_RESOURCE)
     if composed_gslb and composed_gslb.get("kind") == "Gslb":
         gslbs.append(composed_gslb)
-    gslb_signal = gslb.evaluate(gslbs, gslb_cfg.get("hostname", ""),
-                                gslb_cfg.get("strategy", "failover"))
+    strategy = gslb_cfg.get("strategy", "failover")
+    gslb_signal = gslb.evaluate(gslbs, gslb_cfg.get("hostname", ""), strategy)
 
     # 2. Peers' liveness (exclude self by id). In directApi mode read each peer
     # straight from the cloud API (seconds-fresh); otherwise from the polled MR.
@@ -93,7 +93,7 @@ def _compose(req, rsp):
     decision = election.decide(
         identity=identity, gslb=gslb_signal, peers=peers,
         prior_status=prior_status, hysteresis_periods=hysteresis,
-        write_throttle=throttle, now=now,
+        write_throttle=throttle, now=now, strategy=strategy,
     )
 
     # 4a. Own heartbeat, throttled: reuse the previous epoch if it is still

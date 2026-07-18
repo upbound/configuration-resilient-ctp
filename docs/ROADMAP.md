@@ -84,7 +84,12 @@ _Deliverable: cross-cloud pair._
 - **Exit:** cross-cloud failover demonstrated; human sign-off.
 
 ## Phase 3 — Test 3: AWS + Azure + GCP, active-active geo-LB (US/EU/Asia)
-_Deliverable: tri-cloud, tri-continent, load-balanced with single-leader shared-resource failover._
+_Deliverable: tri-cloud, tri-continent, load-balanced **workload traffic** with a
+single management leader over the shared resources. "Active-active" here means
+traffic (roundRobin/geoip) reaches multiple geos at once; it does NOT mean
+multiple leaders — exactly one control plane holds `["*"]`, enforced by
+priority + heartbeat since GSLB gives no exclusivity in this mode. See
+DESIGN-NOTES.md §6._
 
 - [ ] GCP heartbeat = **Pub/Sub Topic** (label; epoch seconds avoids GCP label `:` restriction).
       Verify surfacing (R1).

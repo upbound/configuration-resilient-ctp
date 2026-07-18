@@ -420,6 +420,72 @@ tests = [
          context=gslb_context({"app.cloud.example.com": "Healthy"},
                               hostname="app.cloud.example.com",
                               healthy_ips=["9.9.9.9"], exposed_ips=["1.2.3.4"])),
+
+    # --- #29 election gate (v3): relax the higher-peer block on the LOCAL GSLB
+    # view (gslb-active-failover), never on the peer's lagging role tag alone.
+
+    # THE #29 FIX (regression catcher): cp-b is GSLB-active-failover (its exposed
+    # IPs are in the healthy records) and the higher-priority cp-a is fresh but
+    # advertises role=standby -- it stepped down because ITS geo went unhealthy
+    # and k8gb failed over to cp-b. v3 -> cp-b PROMOTES. Pre-v3 (liveness-only, a
+    # fresh higher peer blocks regardless of role) this was a PERMANENT standby,
+    # the exact bug observed live in Test 1.
+    test("promote-past-stepped-down-higher-peer",
+         xr("cp-b", MEMBER_B, [MEMBER_A, MEMBER_B],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "failover"},
+            heartbeat={"freshnessTTLSeconds": 999999999, "writeThrottleSeconds": 1},
+            failback={"automatic": True, "hysteresisPeriods": 1},
+            status={"promotionCandidateSince": "1"}),
+         [assert_role("leader")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "standby")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])),
+
+    # PARTITION TIE-BREAKER (the safety gate): cp-b is GSLB-active-failover BUT
+    # the higher-priority cp-a is fresh AND still advertises role=leader -- a
+    # gray failure that partitions only the health-check plane, so both geos
+    # self-compute active locally. v3 holds cp-b at standby on cp-a's live
+    # heartbeat: the independent signal that breaks the tie and prevents a double
+    # leader. Hysteresis is satisfied here to prove it is the role==leader check,
+    # not the timer, that holds. (role==leader is evaluated BEFORE the
+    # gslb-active-failover relax -- ordering is load-bearing.)
+    test("hold-standby-when-higher-peer-still-leader",
+         xr("cp-b", MEMBER_B, [MEMBER_A, MEMBER_B],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "failover"},
+            heartbeat={"freshnessTTLSeconds": 999999999, "writeThrottleSeconds": 1},
+            failback={"automatic": True, "hysteresisPeriods": 1},
+            status={"promotionCandidateSince": "1"}),
+         [assert_role("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])),
+
+    # PERMISSIVE MODE unchanged (gslb.found is load-bearing): with no Gslb ->
+    # found=False -> priority+heartbeat only, a fresh higher peer holds a lower
+    # one REGARDLESS of its advertised role. Without independent single-active
+    # arbitration we must stay conservative even for a stepped-down peer.
+    test("permissive-holds-fresh-higher-peer-regardless-of-role",
+         xr("cp-b", MEMBER_B, [MEMBER_A, MEMBER_B],
+            heartbeat={"freshnessTTLSeconds": 999999999}),
+         [assert_role("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "standby")]),
+
+    # FAILOVER-ONLY restriction: in roundRobin every healthy geo is active, so
+    # GSLB-active is NOT exclusive and must not relax the higher-peer gate. cp-b
+    # active + higher cp-a fresh+standby but strategy=roundRobin -> stay standby.
+    test("roundrobin-holds-fresh-stepped-down-higher-peer",
+         xr("cp-b", MEMBER_B, [MEMBER_A, MEMBER_B],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "roundRobin"},
+            heartbeat={"freshnessTTLSeconds": 999999999, "writeThrottleSeconds": 1},
+            failback={"automatic": True, "hysteresisPeriods": 1},
+            status={"promotionCandidateSince": "1"}),
+         [assert_role("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "standby")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])),
 ]
 
 output = {"items": [t.model_dump(by_alias=True, exclude_none=True) for t in tests]}
