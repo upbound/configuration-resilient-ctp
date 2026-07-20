@@ -486,6 +486,69 @@ tests = [
          context=gslb_context({"app.cloud.example.com": "Healthy"},
                               hostname="app.cloud.example.com",
                               healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])),
+
+    # ===== ACTIVE-ACTIVE (roundRobin/geoip) — EXACTLY ONE LEADER ALWAYS =====
+    # In roundRobin/geoip every healthy geo is GSLB-active for TRAFFIC (all
+    # members satisfy gslb.healthy+active). GSLB therefore provides NO
+    # exclusivity, so single MANAGEMENT leadership is carried entirely by
+    # priority + heartbeat: exactly the highest-priority live member holds
+    # ["*"]; every other member is ["Observe"] even though it is GSLB-active.
+    # These cases prove that invariant. Tri-geo set: us(pri1)/eu(pri2)/ap(pri3).
+
+    # AA-1: highest priority, GSLB-active, 3-member roundRobin -> LEADER.
+    test("active-active-roundrobin-highest-priority-leads",
+         xr("cp-a", MEMBER_A, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "roundRobin"}),
+         [assert_role("leader")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.1.1.1", "2.2.2.2", "3.3.3.3"],
+                              exposed_ips=["1.1.1.1"])),
+
+    # AA-2 (headline): a MIDDLE-priority member is GSLB-ACTIVE but NOT leader,
+    # because a higher-priority peer is alive and leading. Active != leader.
+    test("active-active-roundrobin-active-but-not-leader",
+         xr("cp-az", MEMBER_AZ, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "roundRobin"},
+            heartbeat={"freshnessTTLSeconds": 999999999}),
+         [assert_role_azure("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.1.1.1", "2.2.2.2", "3.3.3.3"],
+                              exposed_ips=["2.2.2.2"])),
+
+    # AA-3: lowest priority, geoip, GSLB-active, both higher peers alive
+    # (pri1 leading, pri2 stepped down) -> standby. No promotion while any
+    # higher peer is alive, regardless of their role, in active-active.
+    test("active-active-geoip-lowest-priority-holds",
+         xr("cp-gcp", MEMBER_GCP, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "geoip"},
+            heartbeat={"freshnessTTLSeconds": 999999999}),
+         [assert_role_gcp("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader"),
+                   peer_hb_azure("cp-az", "eastus", 1700000000, "standby")],
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.1.1.1", "2.2.2.2", "3.3.3.3"],
+                              exposed_ips=["3.3.3.3"])),
+
+    # AA-4: single-leader preserved after the highest fails. roundRobin, pri3
+    # is GSLB-active, pri1 is DOWN (stale) but pri2 is alive and leading ->
+    # pri3 defers to the pri2 survivor and stays standby (NO double-promote;
+    # exactly one leader = pri2).
+    test("active-active-no-double-promote-after-failure",
+         xr("cp-gcp", MEMBER_GCP, [MEMBER_A, MEMBER_AZ, MEMBER_GCP],
+            gslb={"hostname": "app.cloud.example.com", "strategy": "roundRobin"},
+            heartbeat={"freshnessTTLSeconds": 1, "writeThrottleSeconds": 1},
+            failback={"automatic": True, "hysteresisPeriods": 1}),
+         [assert_role_gcp("standby")],
+         observed=[peer_hb("cp-a", "us-east-1", 1700000000, "leader"),        # stale -> down
+                   peer_hb_azure("cp-az", "eastus", 9999999999, "leader")],   # fresh survivor leader
+         context=gslb_context({"app.cloud.example.com": "Healthy"},
+                              hostname="app.cloud.example.com",
+                              healthy_ips=["1.1.1.1", "2.2.2.2", "3.3.3.3"],
+                              exposed_ips=["3.3.3.3"])),
 ]
 
 output = {"items": [t.model_dump(by_alias=True, exclude_none=True) for t in tests]}
