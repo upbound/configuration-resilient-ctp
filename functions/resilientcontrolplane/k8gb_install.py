@@ -58,9 +58,15 @@ def _release(name: str, namespace: str, provider_config: str, chart: dict,
             "forProvider": {
                 "chart": chart,
                 "namespace": target_ns,
-                "values": values,
-                "wait": True,
-                "waitTimeout": "600s",
+                # Do NOT wait for chart readiness: the k8gb operator only becomes
+                # healthy AFTER its LoadBalancer/CoreDNS come up, which routinely
+                # exceeds helm's wait timeout -> the Release reports state=failed
+                # (Ready=False) even though the operator is Running. Because Gslb
+                # creation is gated on this Release being Ready, a false-failed
+                # wait permanently blocks the Gslb. Crossplane observes the
+                # underlying resources' health independently, so wait is
+                # unnecessary here.
+                "wait": False,
             },
             "providerConfigRef": {"name": provider_config, "kind": "ProviderConfig"},
         },
