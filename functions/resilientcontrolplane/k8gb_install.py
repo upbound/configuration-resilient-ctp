@@ -76,6 +76,13 @@ def _release(name: str, namespace: str, provider_config: str, chart: dict,
             "forProvider": {
                 "chart": chart,
                 "namespace": target_ns,
+                # The Helm chart values (geo tags, dnsZones, coredns/extdns
+                # wiring). REGRESSION GUARD: the wait:False fix once dropped this
+                # line, so every Release rendered with an empty forProvider.values
+                # — k8gb came up with no coredns/extdns/geo config and no cluster
+                # could lead (the live "empty-coredns-values" bug). Covered by the
+                # k8gb-install-* composition tests, which assert this subtree.
+                "values": values,
                 # Do NOT wait for chart readiness: the k8gb operator only becomes
                 # healthy AFTER its LoadBalancer/CoreDNS come up, which routinely
                 # exceeds helm's wait timeout -> the Release reports state=failed
