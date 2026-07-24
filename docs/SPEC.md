@@ -137,8 +137,11 @@ the **default** so we never depend on `ControlPlane` XR visibility on a workload
 
 ## 6. Leadership decision (the AND rule)
 
-A control plane holds `["*"]` (leader; peers reduce to `["Observe"]`) **iff both hold**
-(`election.decide`, `functions/resilientcontrolplane/election.py`):
+A control plane is the leader **iff both hold** (`election.decide`,
+`functions/resilientcontrolplane/election.py`). Being leader means its governed
+resources keep their author-declared `managementPolicies` (§9 — NOT escalated to
+`["*"]`); peers reduce each governed resource to the passive policy (default
+`["Observe"]`):
 
 1. **Self is GSLB-eligible** — the local `Gslb.status` reports this geo **healthy AND active**
    (`self_eligible = gslb.healthy and gslb.active`). This CP's own liveness is implicitly fresh (it

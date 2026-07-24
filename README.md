@@ -10,8 +10,10 @@ never promoted simultaneously.
 
 > **"Active-active" refers to workload TRAFFIC, not leadership.** k8gb
 > `roundRobin`/`geoip` distribute app traffic across several geos at once, but the
-> set still has exactly one *management* leader (`["*"]`) with the rest at
-> `["Observe"]`. All control planes receive the same claims/XRs; only the leader
+> set still has exactly one *management* leader (whose governed resources keep
+> their author-declared `managementPolicies` — not forced to `["*"]`) with the rest
+> reduced to the passive policy (default `["Observe"]`). All control planes receive
+> the same claims/XRs; only the leader
 > reconciles them. Two management leaders would be split-brain — never permitted.
 
 ## One claim, minimal prerequisites

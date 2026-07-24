@@ -122,9 +122,13 @@ spec:
                         ("active-active" traffic). This affects traffic
                         distribution ONLY. It never changes control-plane
                         leadership: the set always has exactly ONE management
-                        leader (managementPolicies ["*"]) with all others at
-                        ["Observe"], in every strategy. All control planes receive
-                        the same claims/XRs; only the leader reconciles them.
+                        leader whose governed resources KEEP their author-declared
+                        managementPolicies (whatever the composition author set —
+                        NOT forced to ["*"]) while every other control plane
+                        reduces its governed resources to the passive policy
+                        (default ["Observe"]), in every strategy. All control
+                        planes receive the same claims/XRs; only the leader
+                        reconciles them.
                       enum:
                         - failover
                         - roundRobin

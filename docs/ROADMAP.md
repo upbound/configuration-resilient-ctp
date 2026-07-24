@@ -90,8 +90,9 @@ _Deliverable: cross-cloud pair._
 _Deliverable: tri-cloud, tri-continent, load-balanced **workload traffic** with a
 single management leader over the shared resources. "Active-active" here means
 traffic (roundRobin/geoip) reaches multiple geos at once; it does NOT mean
-multiple leaders — exactly one control plane holds `["*"]`, enforced by
-priority + heartbeat since GSLB gives no exclusivity in this mode. See
+multiple leaders — exactly one control plane is the management leader (its
+governed resources keep their author-declared policies, not a blanket `["*"]`),
+enforced by priority + heartbeat since GSLB gives no exclusivity in this mode. See
 DESIGN-NOTES.md §6._
 
 - [ ] GCP heartbeat = **GCS Bucket** (empty; label read via `storage.get_bucket`; epoch seconds
