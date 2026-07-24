@@ -48,6 +48,11 @@ def _compose(req, rsp):
     ts_tag = hb_cfg.get("livenessKey", TS_TAG_DEFAULT)
     ttl = int(hb_cfg.get("freshnessTTLSeconds", 180))
     throttle = int(hb_cfg.get("writeThrottleSeconds", 60))
+    # directApi per-read timeout (seconds), tunable at runtime via the claim so a
+    # cross-cloud / cold read needing more than the default budget doesn't
+    # spuriously fail as "peer unreadable" and block leader election. mr mode
+    # ignores it.
+    read_timeout = int(hb_cfg.get("readTimeoutSeconds", 10))
     # Provider account/project/subscription scoping comes entirely from each
     # provider's ProviderConfig/credentials — never from this API. The heartbeat
     # spec is fully provider-agnostic.
@@ -82,7 +87,7 @@ def _compose(req, rsp):
     peer_members = [m for m in members if m.get("id") != identity["id"]]
     if read_mode == "directApi":
         peers = [
-            heartbeat.read_peer_direct(m, ts_tag, now, ttl)
+            heartbeat.read_peer_direct(m, ts_tag, now, ttl, timeout=read_timeout)
             for m in peer_members
         ]
     else:

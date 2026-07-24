@@ -204,7 +204,7 @@ def build_peer_observe(member: dict, namespace: str, default_provider_config: st
 
 
 def read_peer_direct(member: dict, ts_tag: str, now: int, ttl: int, *,
-                     credential=None) -> PeerLiveness:
+                     timeout: float = None, credential=None) -> PeerLiveness:
     """Read a peer's liveness by calling the cloud API DIRECTLY, bypassing the
     provider observe-poll (docs/SPEC.md §Gotchas/3). Returns freshness within
     seconds instead of up to ``--poll`` (10m). Account/project/subscription
@@ -218,9 +218,12 @@ def read_peer_direct(member: dict, ts_tag: str, now: int, ttl: int, *,
     cp_id = member["id"]
     resource_name = heartbeat_external_name(cp_id)
     try:
+        read_kwargs = {"region": member.get("region", ""),
+                       "credential": credential}
+        if timeout is not None:
+            read_kwargs["timeout"] = timeout
         tags = cloud_read.read_resource_tags(
-            member["provider"], resource_name,
-            region=member.get("region", ""), credential=credential,
+            member["provider"], resource_name, **read_kwargs,
         )
     except cloud_read.CloudReadError:
         tags = None  # unknown -> unreadable -> blocks promotion (fail-safe)

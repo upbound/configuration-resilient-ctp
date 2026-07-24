@@ -270,6 +270,18 @@ spec:
                       description: Minimum seconds between heartbeat writes
                       default: 60
                       minimum: 10
+                    readTimeoutSeconds:
+                      type: integer
+                      description: >-
+                        Per-call timeout (seconds) for directApi peer heartbeat
+                        reads (heartbeat.read=directApi). Cross-cloud or cold
+                        reads (e.g. an Azure-hosted function calling AWS SSM,
+                        plus the first AAD/OIDC token fetch) can exceed a small
+                        budget; too low yields spurious "peer unreadable" and
+                        blocks leader election. Tunable at runtime via the claim
+                        (no rebuild). Ignored in mr read mode.
+                      default: 10
+                      minimum: 1
                 policyControl:
                   type: object
                   description: Management policy control configuration

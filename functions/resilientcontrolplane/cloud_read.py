@@ -35,7 +35,14 @@ from dataclasses import dataclass
 # Default per-call budget. The reader runs inside the composition function's
 # gRPC deadline, so keep cloud calls short and let the caller fall back to the
 # prior role on a miss rather than block/fail the reconcile.
-DEFAULT_TIMEOUT_SECONDS = 2.0
+#
+# 10s (not 2s): a CROSS-CLOUD read — e.g. an Azure-hosted function calling AWS
+# SSM in another region, or the first (cold) call that also pays an AAD/OIDC
+# token fetch — routinely exceeds 2s, raising CloudReadError -> the election
+# treats the peer as unreadable -> fail-safe -> no leader ever elected. Clients
+# are cached across reconciles so steady-state reads stay sub-second; the wider
+# budget only covers the cold/cross-cloud first call.
+DEFAULT_TIMEOUT_SECONDS = 10.0
 
 # Clients (and the Azure AAD token they cache internally) are reused across
 # reconciles. The composition function is a long-lived gRPC server, so a
