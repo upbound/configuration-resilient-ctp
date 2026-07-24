@@ -62,6 +62,16 @@ resource. How this control plane *reads* a peer's heartbeat is set by
   the peer is treated as **unreadable → this CP holds standby** (fail-safe), so
   wire the creds before flipping the mode.
 
+  > **Two prerequisites, both required** (see `docs/SPEC.md` §11.1):
+  > 1. **Vendor the cloud SDKs into the function image** by running
+  >    **`hack/vendor-deps.sh`** *before* `up project build`. `up project build`
+  >    does not install `requirements.txt` deps into the image, so without
+  >    vendoring every peer read fails with `ModuleNotFoundError` and silently
+  >    pins standbys forever.
+  > 2. **Mount read credentials on the function pod** via the pre-created
+  >    `Function` + `DeploymentRuntimeConfig` in `examples/directapi-heartbeat.yaml`
+  >    (prefer ambient IRSA / Workload Identity; static keys as a mounted file).
+  >
   > The example's `Function` pins an immutable digest that must match the
   > installed Configuration release — **re-pin it on every upgrade** (see the
   > file header). Least-privilege IAM per cloud is documented in `docs/SPEC.md` §11

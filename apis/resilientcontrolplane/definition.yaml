@@ -63,6 +63,13 @@ spec:
                   type: array
                   description: All control planes in this resilience set
                   minItems: 1
+                  maxItems: 20
+                  x-kubernetes-validations:
+                    - rule: self.all(m, self.exists_one(x, x.priority == m.priority))
+                      message: >-
+                        each member must have a distinct priority; equal
+                        priorities break the higher/lower election partition and
+                        can elect two leaders (split-brain)
                   items:
                     type: object
                     required:
@@ -191,7 +198,11 @@ spec:
                         Name of a Secret (in the k8gb namespace) holding the
                         external-dns provider credentials. For aws/Route53 it
                         must contain keys access_key_id, secret_access_key and
-                        (optionally) session_token.
+                        (optionally) session_token. PREFER ambient identity
+                        (IRSA / Workload Identity) and leave this EMPTY; static
+                        keys are currently wired as env vars on the external-dns
+                        container, so scope them to Route53-only and rotate them.
+                        See examples/resilientcontrolplane-gslb.yaml.
                     dnsZones:
                       type: array
                       description: DNS zones for k8gb
@@ -284,11 +295,18 @@ spec:
                       minimum: 1
                 policyControl:
                   type: object
-                  description: Management policy control configuration
+                  description: >-
+                    Management policy control configuration. Only "convention"
+                    mode is implemented today; "patch"/"both" (direct MR
+                    patching) are NOT YET IMPLEMENTED — the function does not
+                    read this block for patch mode (see docs/SPEC.md §9.2).
                   properties:
                     mode:
                       type: string
-                      description: Policy toggle mechanism
+                      description: >-
+                        Policy toggle mechanism. "convention" (default) is the
+                        only implemented mode; "patch"/"both" are NOT YET
+                        IMPLEMENTED (deferred, see docs/SPEC.md §9.2).
                       enum:
                         - convention
                         - patch
@@ -296,7 +314,9 @@ spec:
                       default: convention
                     managedResourceSelector:
                       type: object
-                      description: Selector for managed resources (patch mode only)
+                      description: >-
+                        Selector for managed resources (patch mode only). NOT YET
+                        IMPLEMENTED — ignored until the patch path lands.
                       properties:
                         matchLabels:
                           type: object
@@ -308,7 +328,11 @@ spec:
                   properties:
                     automatic:
                       type: boolean
-                      description: Enable automatic failback
+                      description: >-
+                        Enable automatic failback. NOT YET IMPLEMENTED as a
+                        toggle — the function does not read this field; failback
+                        is currently always automatic, damped by
+                        hysteresisPeriods.
                       default: true
                     hysteresisPeriods:
                       type: integer
@@ -325,7 +349,6 @@ spec:
                   enum:
                     - leader
                     - standby
-                    - unknown
                 managementPolicy:
                   type: array
                   description: Published management policy decision

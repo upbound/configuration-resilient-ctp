@@ -39,7 +39,8 @@ _No cloud. Fully author-testable._
         `gslb`, `reason`, conditions.
   - [ ] `k8gb_install.py` — **optional** k8gb install (SPEC §4.1): port the source
         `functions/k8gb-operator` KCL logic to Python (nginx-ingress `Release`, k8gb operator
-        `Release`, init-ingress); gate by `spec.k8gb.install` (`never`/`auto`/`always`); `auto`
+        `Release`, CoreDNS exposed via `serviceType: LoadBalancer` for external-IP discovery); gate
+        by `spec.k8gb.install` (`auto`/`never`/`always`, default `auto`); `auto`
         detects the k8gb `Gslb` CRD / operator via an Observe probe. Adds **`provider-helm`** dep.
 - [ ] Composition tests (`tests/`) with synthetic inputs:
   - [ ] leader-alone → `["*"]`
@@ -61,7 +62,9 @@ _Deliverable: single-cloud cross-region failover **and** failback of one shared 
       bucket MR (default `["Observe"]` when absent). Offline composition tests.
 - [ ] AWS heartbeat = **SSM Parameter** (`recon-heartbeat-<id>`, tag `last-reconciliation-timestamp-utc`
       = epoch seconds). ⚠️ **Verify (R1)** the tag surfaces in `atProvider` on Observe — user-run.
-- [ ] AWS read cred / IAM: `ssm:GetParameters*` + `tag:GetResources` (same-account, multi-region).
+- [ ] AWS read cred / IAM: `ssm:ListTagsForResource` **only** (the function reads the heartbeat tag
+      via `ListTagsForResource`; it never calls `GetParameter`/`GetParameters` or `tag:GetResources`),
+      same-account, multi-region.
 - [ ] Example manifests: two `ResilientControlPlane` members (us-east-1 priority 1, us-west-2
       priority 2), two identical S3 claims (same external-name), `providerconfig` per CP.
 - [ ] k8gb on both CPs via **`spec.k8gb.install: auto`** (installs since aws-ctp doesn't provide it).
@@ -91,8 +94,8 @@ multiple leaders — exactly one control plane holds `["*"]`, enforced by
 priority + heartbeat since GSLB gives no exclusivity in this mode. See
 DESIGN-NOTES.md §6._
 
-- [ ] GCP heartbeat = **Pub/Sub Topic** (label; epoch seconds avoids GCP label `:` restriction).
-      Verify surfacing (R1).
+- [ ] GCP heartbeat = **GCS Bucket** (empty; label read via `storage.get_bucket`; epoch seconds
+      avoids the GCP label `:` restriction). Verify surfacing (R1).
 - [ ] **k8gb active-active** — NEW work vs source package: `roundRobin`/`geoip` strategy, three
       geo-tags `us,eu,asia`, `externalClustersGeoTags` = all three. (Source hard-codes `failover`
       and ships only a 2-cluster `eu,us` example.)

@@ -86,14 +86,16 @@ specifiable**:
 
 | Value | Behavior |
 |---|---|
-| `never` (default) | Assume k8gb is already present; only consume its `Gslb` status. |
-| `auto` | Install k8gb **only if** the k8gb operator / `Gslb` CRD is **not detected** on the cluster; skip otherwise. |
+| `auto` (default) | Install k8gb **only if** the k8gb operator / `Gslb` CRD is **not detected** on the cluster; skip otherwise. Once this package has installed k8gb it keeps rendering it (sticky) so provider-helm never uninstalls it. |
+| `never` | Assume k8gb is already present; only consume its `Gslb` status. |
 | `always` | Always render the k8gb install resources. |
 
 When installing, `resilient-ctp` ports the source package's `functions/k8gb-operator` logic to Python:
-an nginx-ingress `Release`, the k8gb operator `Release` (with `clusterGeoTag`,
-`extGslbClustersGeoTags`, `dnsZones`, `edgeDNSServers`, external-dns), and an init-ingress for IP
-discovery. This requires **`provider-helm`** as a package dependency. All k8gb parameters live under
+an nginx-ingress `Release` and the k8gb operator `Release` (with `clusterGeoTag`,
+`extGslbClustersGeoTags`, `dnsZones`, `edgeDNSServers`, external-dns). Cluster external-IP discovery
+is done by exposing CoreDNS through a cloud LoadBalancer (`coredns.serviceType: LoadBalancer`), from
+which k8gb reads the addresses (`k8gb.io/address_discovery`) — there is **no** `k8gb.io/ip-source`
+init-ingress. This requires **`provider-helm`** as a package dependency. All k8gb parameters live under
 `spec.k8gb` (§8) and mirror the source `K8gbCluster` schema. Detection for `auto` uses an
 `Observe`-only probe of the k8gb `Gslb` CRD / operator Deployment.
 
@@ -110,7 +112,7 @@ discovery. This requires **`provider-helm`** as a package dependency. All k8gb p
 |---|---|---|---|
 | AWS | SSM Parameter (Standard) | free | tag `last-reconciliation-timestamp-utc` |
 | Azure | Resource Group | free | tag |
-| GCP | Pub/Sub Topic (or empty GCS bucket) | ~free | **label** (GCP label values forbid `:` → epoch seconds is portable) |
+| GCP | GCS Bucket (empty) | ~free | **label** read via `storage.get_bucket` (GCP label values forbid `:` → epoch seconds is portable) |
 | Alibaba (later) | OSS bucket (empty) | ~free | tag |
 
 - **Value encoding = Unix epoch UTC seconds** (pure digits) — valid as a tag *and* a GCP label, and
@@ -135,18 +137,27 @@ the **default** so we never depend on `ControlPlane` XR visibility on a workload
 
 ## 6. Leadership decision (the AND rule)
 
-A control plane is the **leader** (its governed resources keep their intended `managementPolicies`;
-peers reduce to `["Observe"]`) **iff all hold**:
+A control plane holds `["*"]` (leader; peers reduce to `["Observe"]`) **iff both hold**
+(`election.decide`, `functions/resilientcontrolplane/election.py`):
 
-1. **GSLB-healthy** for its geo (local `Gslb.status` shows this cluster serving/healthy), **and**
-2. **self-heartbeat fresh** (it can write its own heartbeat), **and**
-3. **no higher-priority peer is alive**, where a higher-priority peer `A` is considered **alive**
-   unless it is *definitively down*.
+1. **Self is GSLB-eligible** — the local `Gslb.status` reports this geo **healthy AND active**
+   (`self_eligible = gslb.healthy and gslb.active`). This CP's own liveness is implicitly fresh (it
+   is the one reconciling). **and**
+2. **No higher-priority peer blocks.** Each higher-priority peer is judged from **its own heartbeat
+   alone** — there is no per-peer GSLB-geo lookup. A higher peer `A` **blocks** unless we can
+   positively conclude it is not leading, via this single predicate over `A`'s heartbeat:
 
-`A` is **definitively down** ⇔ (`A`'s heartbeat is readable **and** stale) **OR** (GSLB reports
-`A`'s geo unhealthy). An **unreadable** higher-priority heartbeat (missing perms / partition) is
-**not** "down" on its own — promotion then requires GSLB to independently confirm `A`'s geo
-unhealthy. Otherwise: **stay `["Observe"]`.**
+   | `A`'s heartbeat state | Outcome |
+   |---|---|
+   | **unreadable** (missing perms / partition / read error) | **blocks** — fail-safe: never promote on our own blindness |
+   | **readable + stale** (older than `freshnessTTLSeconds`) | does **not** block — `A` is down |
+   | **readable + fresh + `role == leader`** | **blocks** — `A` still advertises leadership; its intact heartbeat is the independent partition tie-breaker |
+   | **readable + fresh + `role != leader`** | **blocks**, UNLESS this CP is the **sole GSLB-active geo under `failover` strategy** (`gslb_active_failover`) — then `A` has stepped down for an app-health failover and we may promote (the #29 relaxation). The `role == leader` case above is evaluated first, so a still-leading higher peer blocks even in this mode. |
+
+Otherwise: **stay `["Observe"]`.** The `gslb_active_failover` relaxation is the ONLY thing that lets a
+fresh, stepped-down higher peer be passed; in permissive / no-GSLB / `roundRobin` / `geoip` a fresh
+higher peer always holds a lower one, role-agnostic. Promotion into a gap left by a down/stepped-down
+higher peer is further gated by the two-phase handoff and failover hysteresis (§7).
 
 **Invariants**
 - **Never fail open.** Any ambiguity ⇒ `["Observe"]`.
@@ -208,8 +219,8 @@ spec:
     hostname: app.cloud.example.com    # the GSLB record whose health is watched
     strategy: failover                 # failover | roundRobin | geoip
   k8gb:                                # optional install (§4.1)
-    install: auto                      # XRD default is `never`; examples use `auto` for now
-                                       # never (default) | auto | always
+    install: auto                      # XRD default is `auto`
+                                       # auto (default) | never | always
     version: v0.15.0
     dnsZones:
       - { parentZone: example.com, loadBalancedZone: cloud.example.com, negTTL: 30 }
@@ -229,7 +240,7 @@ spec:
     automatic: true
     hysteresisPeriods: 3
 status:
-  role: leader | standby | unknown
+  role: leader | standby
   managementPolicy: ["*"]              # THE published decision (convention contract, §9)
   reason: "GSLB healthy, self fresh, no higher-priority peer alive"
   gslb: { healthy: true, isActiveForGeo: true }
@@ -301,6 +312,24 @@ peer's heartbeat resource. There are two read paths:
 - **`heartbeat.read: directApi`** — the composition **function pod** reads the peer's cloud API
   directly (seconds-fresh). Needs read creds on the pod (pre-created Function + DeploymentRuntimeConfig;
   see `examples/directapi-heartbeat.yaml`) and the cloud SDKs shipped in the function image.
+
+### 11.1 directApi prerequisites (both are required)
+
+directApi does **not** work out of the box — two things must be in place before you flip
+`spec.heartbeat.read: directApi`:
+
+1. **Vendored cloud SDKs in the function image.** `up project build` does **not** install
+   `functions/*/requirements.txt` third-party deps into the built image (Pylon #900), so the cloud
+   SDKs (`boto3` / `azure-*` / `google-cloud-storage`) must be **vendored** into the function tree
+   before building. Run **`hack/vendor-deps.sh`** — it pip-installs `requirements.txt` into
+   `functions/resilientcontrolplane/vendor/lib/pythonX.Y/site-packages`, which `main.py` appends to
+   `sys.path`. Re-run it (and keep the `sys.path` shim's python version aligned) whenever the embedded
+   runtime's python changes. Without vendoring, every direct read raises `ModuleNotFoundError →
+   CloudReadError → peer unreadable`, silently pinning every standby at `Observe` (fail-safe).
+2. **Read credentials mounted on the function pod.** Wired via a pre-created `Function` +
+   `DeploymentRuntimeConfig` — ship **`examples/directapi-heartbeat.yaml`**, which mounts the creds
+   (prefer ambient IRSA / Workload Identity; static keys as a mounted file, not env). The per-cloud
+   least-privilege permissions are in the table below.
 
 The reader calls **exactly one tag/label read** per cloud (never reads the secret value):
 

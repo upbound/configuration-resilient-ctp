@@ -1,15 +1,27 @@
 # One-time platform prerequisite for the k8gb auto-install path (k8gb.install:
-# auto/always). provider-helm must install arbitrary cluster-scoped resources
-# (k8gb CRDs, ClusterRoles, Deployments), which needs broad RBAC. A Crossplane
-# package CANNOT grant itself cluster-admin (Kubernetes' privilege-escalation
-# guard), so this bootstrap is applied ONCE by the control-plane blueprint —
-# ideally folded into configuration-aws-ctp / the Space so operators and end
-# users never apply it by hand. End users still only apply a ResilientControlPlane.
+# auto/always). provider-helm must install the k8gb + ingress-nginx charts,
+# which include cluster-scoped resources (CRDs, ClusterRoles, an IngressClass),
+# so its ServiceAccount needs broad RBAC. A Crossplane package CANNOT grant
+# itself these rights (Kubernetes' privilege-escalation guard), so this bootstrap
+# is applied ONCE by the control-plane blueprint — ideally folded into
+# configuration-aws-ctp / the Space so operators and end users never apply it by
+# hand. End users still only apply a ResilientControlPlane.
 #
 # Applying this Provider (with a stable service-account name via
 # DeploymentRuntimeConfig) BEFORE the configuration also satisfies the package's
-# provider-helm dependency, so the cluster-admin binding targets a predictable
-# SA name that survives provider version bumps.
+# provider-helm dependency, so the RBAC binding targets a predictable SA name
+# that survives provider version bumps.
+#
+# ############################################################################
+# # SECURITY: do NOT bind provider-helm to cluster-admin.                    #
+# ############################################################################
+# provider-helm applies whatever chart you point it at, so granting it
+# `cluster-admin` makes the k8gb-install ServiceAccount effectively root on the
+# cluster — any future Release (or a compromised chart) could then do anything.
+# The RECOMMENDED default below is a SCOPED ClusterRole granting only the API
+# groups the k8gb + ingress-nginx charts actually install. cluster-admin is
+# retained ONLY as an explicit, commented-out opt-in at the bottom of this file
+# for clusters whose policy tolerates it or for quick throwaway testing.
 ---
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
@@ -31,8 +43,60 @@ spec:
     metadata:
       name: provider-helm
 ---
-# Broad rights so Helm can install the k8gb chart's cluster-scoped resources.
-# Scope this down to k8gb's specific needs if your policy requires it.
+# RECOMMENDED DEFAULT: least-privilege ClusterRole scoped to exactly the API
+# groups the k8gb and ingress-nginx charts install. This replaces the
+# cluster-admin binding. If a future chart bump adds a new cluster-scoped
+# resource type, extend this list rather than reaching for cluster-admin.
+#
+# Note on the rbac.authorization.k8s.io rules: creating ClusterRoles/Bindings is
+# itself gated by the privilege-escalation guard, so the `escalate` and `bind`
+# verbs are required for provider-helm to install the charts' own RBAC. This is
+# still far narrower than cluster-admin (it cannot touch, e.g., nodes, secrets in
+# arbitrary namespaces beyond the chart's, or other CRDs).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: provider-helm-k8gb-installer
+  labels:
+    app.kubernetes.io/part-of: configuration-resilient-ctp
+rules:
+  # Namespaced workload objects the charts create (in the k8gb namespace).
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - serviceaccounts
+      - services
+      - configmaps
+      - secrets
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CRDs the k8gb / external-dns charts install (gslbs, dnsendpoints).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # IngressClass (ingress-nginx) and any ingresses the charts manage.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses", "ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The charts' own RBAC (namespaced Roles/Bindings + cluster-scoped ones for the
+  # k8gb operator / external-dns). escalate+bind are required by the
+  # privilege-escalation guard to create these.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs:
+      ["get", "list", "watch", "create", "update", "patch", "delete", "escalate", "bind"]
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -43,7 +107,7 @@ subjects:
     namespace: crossplane-system
 roleRef:
   kind: ClusterRole
-  name: cluster-admin
+  name: provider-helm-k8gb-installer
   apiGroup: rbac.authorization.k8s.io
 ---
 # In-cluster Helm ProviderConfig referenced by the composition's Releases.
@@ -55,3 +119,22 @@ metadata:
 spec:
   credentials:
     source: InjectedIdentity
+# ############################################################################
+# # OPT-IN ONLY (NOT recommended): bind provider-helm to cluster-admin.      #
+# # Use the scoped ClusterRole above instead. Uncomment this ONLY if your    #
+# # policy explicitly allows it (e.g. throwaway test clusters), and delete   #
+# # the scoped ClusterRoleBinding above so they do not both target the SA.   #
+# ############################################################################
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: provider-helm-k8gb-install-cluster-admin
+# subjects:
+#   - kind: ServiceAccount
+#     name: provider-helm
+#     namespace: crossplane-system
+# roleRef:
+#   kind: ClusterRole
+#   name: cluster-admin
+#   apiGroup: rbac.authorization.k8s.io
