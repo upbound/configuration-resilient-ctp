@@ -1,6 +1,6 @@
 # Reusable kind manifest for the `resilient-mgmt` management cluster.
 # Bring it up with the companion script (which also applies the per-node Docker
-# memory caps that kind itself cannot express):
+# memory/CPU caps that kind itself cannot express):
 #
 #   hack/create-mgmt-cluster.sh
 #
@@ -9,34 +9,44 @@
 # controller-manager / crossplane with "leader election lost" — etcd WAL fsync
 # saturation on the virtualized disk, driven by the CRD/write volume. This
 # manifest (reviewed by 8 independent lenses, 2026-07-24) attacks that on a
-# SINGLE Docker Desktop VM (14 CPU / 26.4 GB), where you CANNOT get true HA or
-# true per-node isolation — all "nodes" are containers sharing one kernel, CPU
-# set, and disk. So the design is: remove/relax the bottleneck, isolate at the
-# scheduling layer, and cap resources at the Docker layer.
+# SINGLE Docker Desktop VM (14 CPU / 27 GB), where you CANNOT get true HA or true
+# per-node isolation — all "nodes" are containers sharing one kernel, CPU set,
+# and disk. So: remove/relax the bottleneck, isolate at the scheduling layer, and
+# cap resources at the Docker layer (in the companion script).
+#
+# ⚠️ NODE IMAGE IS PINNED (kindest/node:v1.36.1@sha256:…). This is deliberate and
+# load-bearing: the kubeadm API version tracks the node image's k8s version, and
+# the kubeadmConfigPatches below MUST match it (v1.36 -> kubeadm v1beta4, whose
+# extraArgs is a name/value LIST). If the image floats to whatever the installed
+# `kind` binary defaults to, a kind upgrade can silently change the k8s/kubeadm
+# version and NULL these patches (observed live: kind 0.25.0 generated v1beta3
+# where extraArgs is a MAP, so v1beta4 list patches were dropped; kind 0.32.0
+# generates v1beta4). Pinning makes the whole config deterministic across kind
+# upgrades. Requires a kind that supports this image (>= v0.30). If you must run
+# an older kind, pin an older image AND switch the two ClusterConfiguration/
+# InitConfiguration patches to v1beta3 (map-form extraArgs).
+# NOTE: k8s 1.36 is recent; if a provider/UXP webhook misbehaves on it, pin an
+# older proven image (e.g. a v1.33.x kindest/node digest for this kind release).
 #
 # TOPOLOGY: 1 control-plane (SINGLE etcd member, TAINTED so no workloads) + 2
 #   workers. NOT multi-member/HA etcd: on one VM, 3 members share one disk (one
-#   failure domain, zero real availability) and TRIPLE the quorum-fsync load that
-#   caused the crashloops.
+#   failure domain, zero real availability) and TRIPLE the quorum-fsync load.
 #
-# etcd: ON-DISK (durable). We deliberately do NOT use tmpfs `/tmp/etcd` here:
-#   this cluster's managed resources are the only in-cluster handles to REAL
-#   billed cloud infra (EKS/VPC, AKS, GKE), so a Docker/VM restart wiping a
-#   RAM-backed etcd would ORPHAN that infra with no delete path. On-disk etcd on
-#   the node's durable /var volume + the tuning below fixes the crashloop without
-#   that risk (post-MRAP the active CRD count is ~116, far below the ~500 that
-#   saturated fsync). To trade durability for memory-speed fsync on a throwaway
-#   cluster, add `dataDir: /tmp/etcd` under etcd.local (/tmp IS tmpfs in the kind
-#   node — verified) and accept total state loss on restart.
+# etcd: ON-DISK (durable). We do NOT use tmpfs `/tmp/etcd`: this cluster's
+#   managed resources are the only in-cluster handles to REAL billed cloud infra
+#   (EKS/VPC, AKS, GKE), so a Docker/VM restart wiping a RAM-backed etcd would
+#   ORPHAN it. On-disk etcd + the tuning below fixes the crashloop without that
+#   risk (post-MRAP active CRD count ~116, far below the ~500 that saturated
+#   fsync). `/tmp` IS tmpfs in the kind node (verified) if you ever want to trade
+#   durability for memory-speed fsync on a throwaway cluster.
 #
 # COMPANION STEPS the kind config cannot do (see create-mgmt-cluster.sh + docs):
-#   - `docker update --memory` per node container: kubelet systemReserved/
-#     kubeReserved do NOT cap host RAM (every node reports the full 26.4 GB →
-#     overcommit → the HOST OOM-killer can kill etcd/apiserver before kubelet
-#     eviction fires). Real per-node RAM ceilings only exist at the Docker layer.
+#   - `docker update --memory`/`--cpuset-cpus` per node: kubelet reservations do
+#     NOT cap host RAM (every node reports the full VM -> overcommit -> the HOST
+#     OOM-killer can kill etcd/apiserver). Real per-node ceilings + core pinning
+#     only exist at the Docker layer.
 #   - Relax Crossplane-CORE leader-election at install (this file only relaxes
-#     the kubeadm scheduler/controller-manager; crossplane-core runs its own LE
-#     at controller-runtime defaults ~15s/10s and can still lose it under churn).
+#     the kubeadm scheduler/controller-manager).
 ---
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -44,40 +54,45 @@ name: resilient-mgmt
 nodes:
   # ---- control-plane: dedicated to etcd + apiserver + controllers ----
   - role: control-plane
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
     kubeadmConfigPatches:
-      # ⚠️ kind v0.25.0 / k8s 1.31.2 generates kubeadm **v1beta3**, where
-      # extraArgs is a MAP (name: value), NOT the v1beta4 name/value LIST.
-      # Patching with v1beta4 makes kind's strategic merge NULL these lists
-      # (verified: `scheduler: extraArgs: null`), silently dropping the tuning.
-      # Match the generated version — v1beta3, map form — so they actually apply.
+      # v1beta4 (matches the pinned v1.36 image): extraArgs is a name/value LIST.
       - |
-        apiVersion: kubeadm.k8s.io/v1beta3
+        apiVersion: kubeadm.k8s.io/v1beta4
         kind: ClusterConfiguration
         etcd:
           local:
             # ON-DISK (durable) — no dataDir override. See header for the tmpfs
             # tradeoff if you ever want a throwaway RAM-backed cluster instead.
             extraArgs:
-              # Right-sized for ~116 active MRDs (real db << 1 GiB); default 2Gi.
-              quota-backend-bytes: "2147483648"   # 2 GiB
-              # Keep history bounded so the on-disk WAL/db stay small.
-              snapshot-count: "10000"
-              auto-compaction-mode: "periodic"
-              auto-compaction-retention: "1h"
+              - name: quota-backend-bytes
+                value: "2147483648"        # 2 GiB (real db << 1 GiB at ~116 MRDs)
+              - name: snapshot-count
+                value: "10000"
+              - name: auto-compaction-mode
+                value: "periodic"
+              - name: auto-compaction-retention
+                value: "1h"
         # Relaxed leader-election so a transient etcd/API stall does not crashloop
         # the kubeadm control-plane controllers (defaults 15s/10s/2s).
         controllerManager:
           extraArgs:
-            leader-elect-lease-duration: "60s"
-            leader-elect-renew-deadline: "45s"
-            leader-elect-retry-period: "10s"
+            - name: leader-elect-lease-duration
+              value: "60s"
+            - name: leader-elect-renew-deadline
+              value: "45s"
+            - name: leader-elect-retry-period
+              value: "10s"
         scheduler:
           extraArgs:
-            leader-elect-lease-duration: "60s"
-            leader-elect-renew-deadline: "45s"
-            leader-elect-retry-period: "10s"
+            - name: leader-elect-lease-duration
+              value: "60s"
+            - name: leader-elect-renew-deadline
+              value: "45s"
+            - name: leader-elect-retry-period
+              value: "10s"
       - |
-        apiVersion: kubeadm.k8s.io/v1beta3
+        apiVersion: kubeadm.k8s.io/v1beta4
         kind: InitConfiguration
         nodeRegistration:
           # Re-add the control-plane taint (kind strips it only for single-node
@@ -87,10 +102,9 @@ nodes:
             - key: node-role.kubernetes.io/control-plane
               effect: NoSchedule
       - |
-        # KubeletConfiguration is taken ONLY from the first control-plane and
-        # applied CLUSTER-WIDE (uploaded to the kubelet-config ConfigMap; workers
-        # inherit it). So these reservations/eviction apply to ALL nodes. Do NOT
-        # add KubeletConfiguration to workers — kubeadm ignores it there.
+        # KubeletConfiguration (v1beta1, version-independent) is taken ONLY from
+        # the first control-plane and applied CLUSTER-WIDE (workers inherit it).
+        # Do NOT add KubeletConfiguration to workers — kubeadm ignores it there.
         apiVersion: kubelet.config.k8s.io/v1beta1
         kind: KubeletConfiguration
         maxPods: 80
@@ -106,4 +120,6 @@ nodes:
   # (No kubeadmConfigPatches: KubeletConfiguration on a worker is dead config;
   # they inherit maxPods/reservations from the control-plane's cluster-wide CM.)
   - role: worker
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
   - role: worker
+    image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5

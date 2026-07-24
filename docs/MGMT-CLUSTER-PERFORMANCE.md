@@ -137,12 +137,16 @@ comfortably sized.
 **load-ready** cluster on a single Docker Desktop VM (14 CPU / 27 GB). Key
 findings from the review that changed the earlier single-node manifest:
 
-- **⚠️ The kubeadm patches must be `v1beta3`, not `v1beta4`.** kind v0.25.0 /
-  k8s 1.31.2 generates `v1beta3` (extraArgs is a **map**, not the v1beta4
-  name/value **list**). A v1beta4 patch makes kind's strategic merge NULL the
-  lists (`scheduler: extraArgs: null`), so the etcd tuning **and the relaxed
-  leader-election silently never apply** — the exact crashloop config, believed
-  fixed. Verify after create: the scheduler/etcd pods must show
+- **⚠️ PIN the node image, and match the kubeadm-patch version to it.** The
+  kubeadm API version tracks the node image's k8s version, and the patches must
+  match it or kind's strategic merge NULLs them (`scheduler: extraArgs: null`) —
+  silently dropping the etcd tuning AND relaxed leader-election (the exact
+  crashloop config, believed fixed). Observed live: kind **0.25.0** → k8s 1.31.2
+  → kubeadm **v1beta3** (extraArgs = MAP); kind **0.32.0** → k8s 1.36.1 → kubeadm
+  **v1beta4** (extraArgs = name/value LIST). So an unpinned image lets a `kind`
+  binary upgrade silently flip the version and break the patches. The manifest
+  now **pins `kindest/node:v1.36.1@sha256:…`** and uses **v1beta4** patches to
+  match. Always verify after create: the scheduler/etcd pods must show
   `--leader-elect-renew-deadline=45s` and `--quota-backend-bytes=…`, not just
   `--leader-elect=true`.
 - **etcd: on-disk (durable), NOT tmpfs.** The MRs are the only handles to real
