@@ -30,6 +30,7 @@ injected.
 """
 
 import os
+import threading
 from dataclasses import dataclass
 
 # Default per-call budget. The reader runs inside the composition function's
@@ -48,7 +49,30 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 # reconciles. The composition function is a long-lived gRPC server, so a
 # module-level cache keyed by scope keeps steady-state reads sub-second and
 # avoids re-fetching an AAD token on every call. Injected clients bypass this.
+#
+# Thread-safety: ``heartbeat.read_peer_direct`` is fanned out across a thread
+# pool (WS-3), so multiple threads hit this cache concurrently. ``_CLIENT_LOCK``
+# guards the get-or-create in ``_cached_client`` so the cache is never torn and
+# at most one client is built per scope.
 _CLIENT_CACHE: dict = {}
+_CLIENT_LOCK = threading.Lock()
+
+
+def _cached_client(cache_key, factory):
+    """Return the SDK client cached under ``cache_key``, building it once via
+    ``factory()`` on a miss. Thread-safe (double-checked under ``_CLIENT_LOCK``)
+    so concurrent ``read_peer_direct`` fan-out never corrupts the cache or builds
+    N clients for the same scope. ``factory`` runs under the lock, which only
+    serializes the rare cold build; steady-state hits take the lock-free path."""
+    client = _CLIENT_CACHE.get(cache_key)
+    if client is not None:
+        return client
+    with _CLIENT_LOCK:
+        client = _CLIENT_CACHE.get(cache_key)
+        if client is None:
+            client = factory()
+            _CLIENT_CACHE[cache_key] = client
+    return client
 
 
 class CloudReadError(Exception):
@@ -130,7 +154,7 @@ def read_resource_tags(
         return _azure_read_tags(resource_name, subscription_id, credential,
                                 client, timeout)
     if provider == "gcp":
-        return _gcp_read_labels(resource_name, project, client)
+        return _gcp_read_labels(resource_name, project, client, timeout)
     raise CloudReadError(f"direct tag read not supported for provider '{provider}'")
 
 
@@ -139,14 +163,15 @@ def _aws_read_tags(resource_name, region, client, timeout):
     try:
         if client is None:
             cache_key = ("aws-ssm", region, timeout)
-            client = _CLIENT_CACHE.get(cache_key)
-            if client is None:
+
+            def _factory():
                 import boto3  # lazy: only needed for a live aws read
                 from botocore.config import Config
                 cfg = Config(connect_timeout=timeout, read_timeout=timeout,
                              retries={"max_attempts": 1})
-                client = boto3.client("ssm", region_name=region, config=cfg)
-                _CLIENT_CACHE[cache_key] = client
+                return boto3.client("ssm", region_name=region, config=cfg)
+
+            client = _cached_client(cache_key, _factory)
         resp = client.list_tags_for_resource(
             ResourceType="Parameter", ResourceId=resource_name,
         )
@@ -171,18 +196,35 @@ def _azure_read_tags(resource_name, subscription_id, credential, client,
             subscription_id = subscription_id or os.environ.get(
                 "AZURE_SUBSCRIPTION_ID", "")
             cache_key = ("azure-rm", subscription_id)
-            client = _CLIENT_CACHE.get(cache_key)
-            if client is None:
+
+            def _factory():
                 from azure.identity import DefaultAzureCredential
                 try:  # azure-mgmt-resource >=26 moved the client under .resources
                     from azure.mgmt.resource.resources import ResourceManagementClient
                 except ImportError:
                     from azure.mgmt.resource import ResourceManagementClient
-                if credential is None:
-                    credential = DefaultAzureCredential()
-                client = ResourceManagementClient(credential, subscription_id)
-                _CLIENT_CACHE[cache_key] = client
-        group = client.resource_groups.get(resource_name, timeout=timeout)
+                cred = credential if credential is not None else DefaultAzureCredential()
+                # retry_total=0: one attempt, so a slow read costs ~=timeout, not
+                # timeout x retries (matches AWS retries.max_attempts=1). Honored
+                # by azure-core's RetryPolicy configured from this kwarg.
+                return ResourceManagementClient(cred, subscription_id,
+                                                retry_total=0)
+
+            client = _cached_client(cache_key, _factory)
+        # Bounding the call in azure-core 1.41.0 / azure-mgmt-resource 23.2.0:
+        #   * timeout=            -> RetryPolicy pops it as the overall retry
+        #                            budget and clamps the per-attempt CONNECT
+        #                            timeout (policies/_retry.py:123,371);
+        #   * connection_timeout/ -> popped and honored DIRECTLY by the requests
+        #     read_timeout           transport (transport/_requests_basic.py:
+        #                            371,379), so they also bound the READ phase
+        #                            a bare timeout= alone does NOT cover.
+        # All three are set so a slow/hung read is bounded by ~=timeout. See the
+        # WS-2 Azure-timeout finding.
+        group = client.resource_groups.get(
+            resource_name, timeout=timeout,
+            connection_timeout=timeout, read_timeout=timeout,
+        )
         tags = group.tags or {}
     except Exception as e:
         raise CloudReadError(
@@ -191,19 +233,25 @@ def _azure_read_tags(resource_name, subscription_id, credential, client,
     return tags
 
 
-def _gcp_read_labels(resource_name, project, client):
+def _gcp_read_labels(resource_name, project, client,
+                     timeout=DEFAULT_TIMEOUT_SECONDS):
     """Read a Cloud Storage bucket's label via ``get_bucket``. ``project`` is
     optional — like the AWS account/GCP project generally, it defaults from the
     credentials (ADC / GOOGLE_CLOUD_PROJECT) when not given."""
     try:
         if client is None:
             cache_key = ("gcp-storage", project)
-            client = _CLIENT_CACHE.get(cache_key)
-            if client is None:
+
+            def _factory():
                 from google.cloud import storage  # lazy
-                client = storage.Client(project=project or None)
-                _CLIENT_CACHE[cache_key] = client
-        bucket = client.get_bucket(resource_name)
+                return storage.Client(project=project or None)
+
+            client = _cached_client(cache_key, _factory)
+        # timeout bounds the call; retry=None disables google-api-core's default
+        # retry so a slow read costs ~=timeout, not timeout x retries (matches
+        # AWS retries.max_attempts=1). storage.Client has no constructor retry
+        # knob, so retries are disabled per-call here.
+        bucket = client.get_bucket(resource_name, timeout=timeout, retry=None)
         labels = bucket.labels or {}
     except Exception as e:
         raise CloudReadError(

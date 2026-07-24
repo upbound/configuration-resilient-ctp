@@ -67,6 +67,21 @@ def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
     prior_candidate_since = int(prior_status.get("promotionCandidateSince", 0) or 0)
     prior_handoff = prior_status.get("lastHandoffTime", "") or ""
 
+    # C1: distinguish *continuous* leadership from a stale persisted role. A CP
+    # that was leader, died and recovered returns with status.role=="leader" but a
+    # stale selfHeartbeatEpoch; treating that as "currently leading" would let it
+    # skip the handoff/hysteresis gates and double-promote against an interim
+    # leader that still holds ["*"]. Persisted role=="leader" is trusted as
+    # CURRENT leadership only when this CP's own heartbeat is still fresh. decide()
+    # is not passed the raw freshnessTTL, so we bound freshness by the failover
+    # damping window: no other CP can have completed a takeover within one window,
+    # so a self-heartbeat newer than it proves uninterrupted leadership.
+    from .prelude import as_int
+    hysteresis_window = max(1, hysteresis_periods) * max(1, write_throttle)
+    prior_self_epoch = as_int(prior_status.get("selfHeartbeatEpoch"), 0)
+    self_hb_fresh = prior_self_epoch > 0 and (now - prior_self_epoch) <= hysteresis_window
+    continuous_leader = prior_role == "leader" and self_hb_fresh
+
     reasons = []
 
     # (1)+(2) Am I eligible at all? GSLB must consider me healthy and serving.
@@ -88,7 +103,14 @@ def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
 
     def _blocks(peer):
         if not peer.readable:
-            return "unreadable"          # fail-safe: never promote on blindness
+            # Fail-safe: never promote on our own blindness -- UNLESS we are the
+            # sole GSLB-active geo under `failover`. A dead region reads as
+            # *unreadable* over directApi but as *stale* over mr; treating the
+            # unreadable higher peer as definitively-down here gives both modes
+            # the SAME region-death outcome (C2). The partition tie-breaker is
+            # untouched: a higher peer we CAN read that is fresh+role=leader still
+            # blocks below, so a health-check-plane-only partition still holds.
+            return None if gslb_active_failover else "unreadable"
         if not peer.fresh:
             return None                  # readable + stale => down
         if peer.role == "leader":
@@ -117,19 +139,23 @@ def decide(*, identity: dict, gslb, peers: list, prior_status: dict,
     candidate_since = 0
 
     if want_leader:
-        # Two-phase handoff: if I'm not already the leader and a lower-priority
-        # peer still advertises leader, wait for it to release first.
+        # Two-phase handoff: a fresh lower-priority peer still advertising
+        # role=leader ALWAYS forces the wait, regardless of prior_role -- a
+        # recovered former leader (stale persisted role=="leader") must not seize
+        # ["*"] while an interim lower-priority leader still holds it (C1).
         lower_leader = [p.cp_id for p in lower if p.role == "leader" and p.fresh]
-        if lower_leader and prior_role != "leader":
+        if lower_leader:
             want_leader = False
             reasons.append(
                 f"waiting for lower-priority leader(s) {lower_leader} to release "
                 "(two-phase handoff)"
             )
         # Failover hysteresis: only when promoting into a gap left by higher
-        # peers (higher set non-empty) and not already leading.
-        elif higher and prior_role != "leader":
-            window = max(1, hysteresis_periods) * max(1, write_throttle)
+        # peers (higher set non-empty) and NOT already *continuously* leading. A
+        # recovered former leader (continuous_leader False) must re-serve the
+        # hysteresis before promoting into a higher-peer gap (C1).
+        elif higher and not continuous_leader:
+            window = hysteresis_window
             if prior_candidate_since <= 0:
                 candidate_since = now
                 want_leader = False

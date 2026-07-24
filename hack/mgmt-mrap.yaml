@@ -1,0 +1,128 @@
+# Narrow ManagedResourceActivationPolicies for the resilient-mgmt kind cluster.
+#
+# Derived from: configuration-aws-ctp v0.1.0, configuration-azure-ctp
+#   v0.0.0-1784563369, configuration-gcp-ctp v0.0.0-gcpctpdev3 (the versions
+#   installed on the 2026-07-24 mgmt cluster). RE-VALIDATE (see
+#   docs/MGMT-MRAP-DESIGN.md) whenever any of these is bumped.
+#
+# WHY: installing the three ctp configs pulls three FULL provider families
+# (~500+ CRDs). Crossplane's default Helm MRAP activates "*" (every MRD); that
+# CRD/watch/etcd-write volume saturated the kind cluster's etcd WAL fsync ->
+# apiserver/leader-election crashloops (docs/MGMT-CLUSTER-PERFORMANCE.md). These
+# MRAPs activate ONLY the MRDs the four Configurations compose.
+#
+# ⚠️ MRAP MATCH SEMANTICS (verified against Crossplane source
+# apis/apiextensions/v1alpha1/mrd_policy_types.go -> filepath.Match): the
+# pattern is matched with Go path/filepath.Match, where `*` matches any run of
+# non-`/` chars — i.e. `*` SPANS DOTS. So `*.ec2.aws.m.upbound.io` matches every
+# ec2 MRD (safe: ec2 is a leaf group) but `*.azure.m.upbound.io` would match the
+# ENTIRE azure family (every `<svc>.azure.m.upbound.io`) — so the base azure
+# group is enumerated by EXACT MRD name, never globbed. Likewise the three
+# LARGEST groups (ec2, compute, network — ~90-120 CRDs each) are enumerated
+# per-MRD; a whole-group glob on them would re-activate ~300 CRDs and re-saturate
+# etcd. Small leaf groups stay `*.<group>` (upgrade-resilient, negligible count).
+#
+# ⚠️ PREREQ (verified: crossplane/crossplane#6984 — deleting the "*" MRAP does
+# NOT deactivate already-Active MRDs): the default "*" MRAP must be PREVENTED,
+# not deleted. Install UXP/Crossplane with Helm value
+#   provider:
+#     defaultActivations: []
+# MRAPs are ADDITIVE, so any surviving "*" MRAP re-activates everything.
+#
+# ⚠️ COMPLEMENTARY, not a full fix: MRAP gates MRD activation, NOT how many
+# provider-family pods are installed. Each installed provider pod renews a
+# leader-election lease every few seconds (fsync-bound etcd writes) regardless of
+# MRAP. Combine this with the docs/MGMT-CLUSTER-PERFORMANCE.md remediations:
+# trim provider families to specific service providers, tmpfs etcd, relaxed
+# leader-election.
+#
+# Apply on a FRESH cluster BEFORE the ctp configs reconcile (hack/apply-mgmt-mrap.sh).
+# (UNVERIFIED) = inferred from the provider model, not observed as a live MR;
+# validate on the next rebuild via the "no matches for kind" check.
+---
+apiVersion: apiextensions.crossplane.io/v1alpha1
+kind: ManagedResourceActivationPolicy
+metadata:
+  name: resilient-mgmt-aws
+spec:
+  activate:
+    # EKS control plane (aws-ctp): Cluster, NodeGroup, Addon, ClusterAuth,
+    # PodIdentityAssociation — all observed. Leaf group, ~12 CRDs.
+    - "*.eks.aws.m.upbound.io"
+    # IAM (aws-ctp): Role, RolePolicyAttachment, OpenIDConnectProvider (IRSA) —
+    # Role observed; leaf group, ~30 CRDs, kept per-group.
+    - "*.iam.aws.m.upbound.io"
+    # resilient-ctp AWS heartbeat: SSM Parameter — observed.
+    - "*.ssm.aws.m.upbound.io"
+    # VPC networking (aws-ctp) — ec2 is the family's LARGEST group, so per-MRD.
+    # All observed live during teardown.
+    - vpcs.ec2.aws.m.upbound.io
+    - subnets.ec2.aws.m.upbound.io
+    - internetgateways.ec2.aws.m.upbound.io
+    - routetables.ec2.aws.m.upbound.io
+    - routes.ec2.aws.m.upbound.io
+    - routetableassociations.ec2.aws.m.upbound.io
+    - mainroutetableassociations.ec2.aws.m.upbound.io
+    - securitygroups.ec2.aws.m.upbound.io
+    - securitygrouprules.ec2.aws.m.upbound.io
+    # Conditional (small groups; uncomment if aws-ctp composes them):
+    # - keys.kms.aws.m.upbound.io          # EKS envelope encryption
+    # - groups.cloudwatchlogs.aws.m.upbound.io   # EKS control-plane logging
+---
+apiVersion: apiextensions.crossplane.io/v1alpha1
+kind: ManagedResourceActivationPolicy
+metadata:
+  name: resilient-mgmt-gcp
+spec:
+  activate:
+    # GKE control plane (gcp-ctp): Cluster, NodePool — observed. Leaf group.
+    - "*.container.gcp.m.upbound.io"
+    # Workload Identity (gcp-ctp): ServiceAccount, ServiceAccountKey,
+    # ServiceAccountIAMMember/ProjectIAMMember — SA observed. Leaf group.
+    - "*.cloudplatform.gcp.m.upbound.io"
+    # resilient-ctp GCP heartbeat: Storage Bucket — observed.
+    - "*.storage.gcp.m.upbound.io"
+    # VPC networking (gcp-ctp) — compute is the family's LARGEST group, per-MRD.
+    - networks.compute.gcp.m.upbound.io
+    - subnetworks.compute.gcp.m.upbound.io
+    # Conditional (private/NAT GKE — uncomment if composed): (UNVERIFIED)
+    # - routers.compute.gcp.m.upbound.io
+    # - routerNats.compute.gcp.m.upbound.io
+    # - firewalls.compute.gcp.m.upbound.io
+    # - addresses.compute.gcp.m.upbound.io
+    # Conditional: if gcp-ctp self-enables GCP APIs via Crossplane. (UNVERIFIED)
+    # - services.serviceusage.gcp.m.upbound.io
+---
+apiVersion: apiextensions.crossplane.io/v1alpha1
+kind: ManagedResourceActivationPolicy
+metadata:
+  name: resilient-mgmt-azure
+spec:
+  activate:
+    # resilient-ctp Azure heartbeat + ctp ResourceGroup — root `azure` group.
+    # EXACT name (NOT a glob): `*.azure.m.upbound.io` would match the entire
+    # Azure family (see match-semantics note above). (UNVERIFIED plural.)
+    - resourcegroups.azure.m.upbound.io
+    # AKS (azure-ctp): KubernetesCluster + KubernetesClusterNodePool both live in
+    # containerservice. Leaf group. (UNVERIFIED)
+    - "*.containerservice.azure.m.upbound.io"
+    # Workload identity (azure-ctp): UserAssignedIdentity. Leaf group. (UNVERIFIED)
+    - "*.managedidentity.azure.m.upbound.io"
+    # RBAC for the identity (azure-ctp): RoleAssignment. Leaf group. (UNVERIFIED)
+    - "*.authorization.azure.m.upbound.io"
+    # VNet networking (azure-ctp) — network is a LARGE group, per-MRD. (UNVERIFIED)
+    - virtualnetworks.network.azure.m.upbound.io
+    - subnets.network.azure.m.upbound.io
+---
+apiVersion: apiextensions.crossplane.io/v1alpha1
+kind: ManagedResourceActivationPolicy
+metadata:
+  name: resilient-mgmt-shared
+spec:
+  activate:
+    # provider-helm: UXP install on each workload CP, k8gb nginx/operator,
+    # cert-manager — Release observed on both clouds.
+    - "*.helm.m.crossplane.io"
+    # provider-kubernetes: in-cluster Objects (GKE workload-identity settings,
+    # the k8gb Gslb applied via an Object) — Object observed.
+    - "*.kubernetes.m.crossplane.io"

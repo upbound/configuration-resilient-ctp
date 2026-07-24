@@ -32,8 +32,8 @@ spec:
   gslb:
     hostname: app.cloud.example.com
     strategy: failover
-  # Optionally install k8gb here. `auto` installs only if k8gb is absent;
-  # use `never` (default) to rely on heartbeat + priority alone (no DNS).
+  # Optionally install k8gb here. `auto` (the default) installs only if k8gb is
+  # absent; use `never` to rely on heartbeat + priority alone (no DNS).
   k8gb:
     install: auto
     version: v0.15.0

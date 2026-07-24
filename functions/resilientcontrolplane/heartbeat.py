@@ -11,11 +11,11 @@ contention) carrying a single timestamp tag/label. This control plane:
 
 Peer coordinates (provider/region/name) are derived from ``spec.members``.
 
-AWS (SSM Parameter, ``ssm.aws.m.upbound.io/v1beta1``) and Azure (Resource Group,
-``azure.m.upbound.io/v1beta1``) are implemented; GCP/Alibaba builders raise
-until their phases (SPEC §5.1). The timestamp is read back from
-``status.atProvider.tags`` (provider-agnostic in ``read_peer``); confirm the tag
-surfaces there for each provider before relying on it live (SPEC §5.1 caveat).
+AWS (SSM Parameter, ``ssm.aws.m.upbound.io/v1beta1``), Azure (Resource Group,
+``azure.m.upbound.io/v1beta1``) and GCP (Cloud Storage Bucket,
+``storage.gcp.m.upbound.io/v1beta1``) are implemented; only Alibaba raises until
+its phase (SPEC §5.1). The timestamp is read back from ``status.atProvider.tags``
+(``labels`` for GCP; kept provider-agnostic in ``read_peer``).
 """
 
 from dataclasses import dataclass
@@ -27,6 +27,12 @@ from .prelude import (
     heartbeat_external_name,
     peer_hb_resource_name,
 )
+
+# Sentinel "age" for a peer whose epoch is unknown/unreadable: a value so large
+# it can never be <= any sane freshness TTL, so the peer is never treated as
+# fresh. Defined locally to avoid touching prelude.py (not owned by WS-2);
+# WS-4/orchestrator will centralize this as UNKNOWN_AGE_SENTINEL in prelude.
+UNKNOWN_AGE = 10 ** 9
 
 
 @dataclass
@@ -203,46 +209,81 @@ def build_peer_observe(member: dict, namespace: str, default_provider_config: st
     return name, res
 
 
-def read_peer_direct(member: dict, ts_tag: str, now: int, ttl: int, *,
-                     timeout: float = None, credential=None) -> PeerLiveness:
-    """Read a peer's liveness by calling the cloud API DIRECTLY, bypassing the
-    provider observe-poll (docs/SPEC.md §Gotchas/3). Returns freshness within
-    seconds instead of up to ``--poll`` (10m). Account/project/subscription
-    scoping comes from the credentials (never an API input).
+def _liveness_from_tags(member: dict, tags, ts_tag: str, now: int,
+                        ttl: int) -> PeerLiveness:
+    """Build a :class:`PeerLiveness` from a peer's raw heartbeat tag/label dict.
 
-    Fail-safe: any read failure (auth/network/throttle/not-found) or a resource
-    that carries no timestamp tag yields ``readable=False``, which the election
-    treats as "peer unknown -> do NOT promote". A transient read miss must never
-    be read as "peer down"."""
-    from . import cloud_read
-    cp_id = member["id"]
-    resource_name = heartbeat_external_name(cp_id)
-    try:
-        read_kwargs = {"region": member.get("region", ""),
-                       "credential": credential}
-        if timeout is not None:
-            read_kwargs["timeout"] = timeout
-        tags = cloud_read.read_resource_tags(
-            member["provider"], resource_name, **read_kwargs,
-        )
-    except cloud_read.CloudReadError:
-        tags = None  # unknown -> unreadable -> blocks promotion (fail-safe)
+    Single source of the raw_ts -> readable -> epoch -> age -> fresh -> role
+    logic, shared by :func:`read_peer` (tags from the polled Observe MR) and
+    :func:`read_peer_direct` (tags from a live cloud read). ``tags`` is ``None``
+    (or empty) when the peer was UNREADABLE -> ``readable=False``, which the
+    election treats as "peer unknown -> do NOT promote".
 
-    raw_ts = tags.get(ts_tag) if tags is not None else None
+    Pure and stateless (no shared mutable state), so it is safe to call
+    concurrently from the WS-3 thread-pool fan-out."""
+    tags = tags or {}
+    raw_ts = tags.get(ts_tag)
     readable = raw_ts is not None
     epoch = as_int(raw_ts, 0)
-    age = now - epoch if epoch else 10 ** 9
+    age = now - epoch if epoch else UNKNOWN_AGE
     fresh = readable and epoch > 0 and age <= ttl
     return PeerLiveness(
-        cp_id=cp_id,
+        cp_id=member["id"],
         priority=int(member["priority"]),
         geo_tag=member.get("geoTag", ""),
         epoch=epoch,
         age_seconds=age,
         fresh=fresh,
         readable=readable,
-        role=(tags.get(ROLE_TAG, "") or "") if tags is not None else "",
+        role=tags.get(ROLE_TAG, "") or "",
     )
+
+
+def read_peer_direct(member: dict, ts_tag: str, now: int, ttl: int, *,
+                     timeout: float = None, credential=None) -> PeerLiveness:
+    """Read a peer's liveness by calling the cloud API DIRECTLY, bypassing the
+    provider observe-poll (docs/SPEC.md §Gotchas/3). Returns freshness within
+    seconds instead of up to ``--poll`` (10m).
+
+    Per-member cloud scoping: each peer is read against ITS OWN account/project/
+    subscription — the GCP ``project`` and Azure ``subscription_id`` are passed
+    through when present on the ``member`` entry (and its ``credential`` when
+    supplied), so a cross-account/cross-cloud peer is NOT silently read against
+    this function's ambient identity. The AWS account is a property of the
+    (per-member) credential, never an API input.
+
+    Fail-safe: any read failure (auth/network/throttle/not-found), an
+    unresolvable per-member scope/credential, or a resource that carries no
+    timestamp tag yields ``readable=False``, which the election treats as
+    "peer unknown -> do NOT promote". A transient read miss must never be read
+    as "peer down".
+
+    Thread-safe: holds no shared state; ``cloud_read`` guards its client cache
+    with a lock, so this is safe under the WS-3 concurrent fan-out."""
+    from . import cloud_read
+    cp_id = member["id"]
+    resource_name = heartbeat_external_name(cp_id)
+    read_kwargs = {
+        "region": member.get("region", ""),
+        "credential": credential,
+    }
+    # Per-member scope, forwarded only when the member carries it (else the SDK
+    # falls back to ambient/env for the same-account case — no regression).
+    project = member.get("project")
+    if project:
+        read_kwargs["project"] = project
+    subscription_id = member.get("subscription_id")
+    if subscription_id:
+        read_kwargs["subscription_id"] = subscription_id
+    if timeout is not None:
+        read_kwargs["timeout"] = timeout
+    try:
+        tags = cloud_read.read_resource_tags(
+            member["provider"], resource_name, **read_kwargs,
+        )
+    except cloud_read.CloudReadError:
+        tags = None  # unknown -> unreadable -> blocks promotion (fail-safe)
+    return _liveness_from_tags(member, tags, ts_tag, now, ttl)
 
 
 def read_peer(member: dict, observed: dict, ts_tag: str, now: int,
@@ -255,18 +296,4 @@ def read_peer(member: dict, observed: dict, ts_tag: str, now: int,
     # GCP stores the heartbeat in labels; AWS/Azure in tags.
     field = "labels" if member.get("provider") == "gcp" else "tags"
     tags = at.get(field, {}) or {}
-    raw_ts = tags.get(ts_tag)
-    readable = raw_ts is not None
-    epoch = as_int(raw_ts, 0)
-    age = now - epoch if epoch else 10 ** 9
-    fresh = readable and epoch > 0 and age <= ttl
-    return PeerLiveness(
-        cp_id=member["id"],
-        priority=int(member["priority"]),
-        geo_tag=member.get("geoTag", ""),
-        epoch=epoch,
-        age_seconds=age,
-        fresh=fresh,
-        readable=readable,
-        role=tags.get(ROLE_TAG, "") or "",
-    )
+    return _liveness_from_tags(member, tags, ts_tag, now, ttl)
