@@ -15,6 +15,21 @@ Module layout mirrors configuration-aws-ctp: a flat function directory with a
 ``compose`` entrypoint and sibling modules imported relatively.
 """
 
+import os
+import sys
+
+# Pylon #900: the Upbound embedded-Python build does NOT install requirements.txt
+# third-party modules into the function image. Vendor them (functions/
+# resilientcontrolplane/vendor, built for linux/amd64 + py3.11) and put that dir
+# on sys.path so cloud_read.py's lazy boto3/azure/google imports resolve. Without
+# this, directApi peer reads raise ModuleNotFoundError -> CloudReadError -> every
+# peer reads "unreadable" -> the election fail-safe holds standbys at standby
+# forever (silently). Appended (not prepended) so the image's own deps win.
+_vendor = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                       "vendor", "lib", "python3.11", "site-packages")
+if os.path.isdir(_vendor) and _vendor not in sys.path:
+    sys.path.append(_vendor)
+
 from crossplane.function import resource, response
 
 from . import election, gslb, gslb_build, heartbeat, k8gb_install, status
