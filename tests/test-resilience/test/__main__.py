@@ -442,6 +442,22 @@ tests = [
                               hostname="app.cloud.example.com",
                               healthy_ips=["1.2.3.4"], exposed_ips=["1.2.3.4"])),
 
+    # C1 REGRESSION GUARD (double-leader on former-leader recovery): cp-a is the
+    # HIGHEST priority and its persisted status.role=="leader", but it DIED and
+    # recovered -> its selfHeartbeatEpoch is stale (1700000000, far older than the
+    # failover damping window). A lower-priority peer cp-b took over during the
+    # outage and is fresh + role=leader (still holding ["*"]). cp-a must NOT trust
+    # the stale persisted role as "currently leading" and seize ["*"] -- it must
+    # wait out the two-phase handoff (standby) until cp-b releases. Before the C1
+    # fix, prior_role=="leader" skipped the handoff gate -> cp-a AND cp-b both
+    # leader (split-brain). continuous_leader is False here (self-hb stale).
+    test("recovered-former-leader-holds-for-interim-leader",
+         xr("cp-a", MEMBER_A, [MEMBER_A, MEMBER_B],
+            heartbeat={"freshnessTTLSeconds": 999999999},
+            status={"role": "leader", "selfHeartbeatEpoch": 1700000000}),
+         [assert_role("standby")],
+         observed=[peer_hb("cp-b", "us-west-2", 1700000000, "leader")]),
+
     # PARTITION TIE-BREAKER (the safety gate): cp-b is GSLB-active-failover BUT
     # the higher-priority cp-a is fresh AND still advertises role=leader -- a
     # gray failure that partitions only the health-check plane, so both geos
