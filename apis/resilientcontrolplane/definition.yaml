@@ -63,6 +63,13 @@ spec:
                   type: array
                   description: All control planes in this resilience set
                   minItems: 1
+                  maxItems: 20
+                  x-kubernetes-validations:
+                    - rule: self.all(m, self.exists_one(x, x.priority == m.priority))
+                      message: >-
+                        each member must have a distinct priority; equal
+                        priorities break the higher/lower election partition and
+                        can elect two leaders (split-brain)
                   items:
                     type: object
                     required:
@@ -108,28 +115,98 @@ spec:
                       description: The GSLB record whose health is watched
                     strategy:
                       type: string
-                      description: k8gb load balancing strategy
+                      description: >-
+                        k8gb load-balancing strategy for WORKLOAD TRAFFIC (the
+                        data plane): "failover" serves one geo at a time;
+                        "roundRobin"/"geoip" serve multiple geos simultaneously
+                        ("active-active" traffic). This affects traffic
+                        distribution ONLY. It never changes control-plane
+                        leadership: the set always has exactly ONE management
+                        leader whose governed resources KEEP their author-declared
+                        managementPolicies (whatever the composition author set —
+                        NOT forced to ["*"]) while every other control plane
+                        reduces its governed resources to the passive policy
+                        (default ["Observe"]), in every strategy. All control
+                        planes receive the same claims/XRs; only the leader
+                        reconciles them.
                       enum:
                         - failover
                         - roundRobin
                         - geoip
                       default: failover
+                    manage:
+                      type: boolean
+                      description: >-
+                        Whether the composition CREATES the k8gb Gslb for this
+                        hostname (default true), so a single claim yields a
+                        working GSLB signal. Set false to consume a Gslb you
+                        manage yourself. The Gslb is only created once k8gb is
+                        ready (its CRD exists).
+                      default: true
+                    ingressClassName:
+                      type: string
+                      description: Ingress class for the Gslb-managed ingress
+                      default: nginx
+                    backendServiceName:
+                      type: string
+                      description: >-
+                        Name of the in-cluster Service the Gslb ingress routes
+                        to (your workload). Ignored when demoApp is true.
+                      default: app
+                    demoApp:
+                      type: boolean
+                      description: >-
+                        Render a tiny nginx Deployment+Service behind the Gslb so
+                        k8gb has a real endpoint to health-check. Intended for
+                        onboarding/tests; scaling it to zero drives a live GSLB
+                        health failure.
+                      default: false
                 k8gb:
                   type: object
                   description: Optional k8gb installation configuration
                   properties:
                     install:
                       type: string
-                      description: Whether to install k8gb operator
+                      description: >-
+                        Whether the composition installs the k8gb operator.
+                        "auto" (default) installs it only if not already present,
+                        so a single claim brings up GSLB with no manual steps;
+                        "never" relies on heartbeat + priority alone; "always"
+                        forces install.
                       enum:
                         - never
                         - auto
                         - always
-                      default: never
+                      default: auto
                     version:
                       type: string
                       description: k8gb version to install
                       default: v0.15.0
+                    dnsProvider:
+                      type: string
+                      description: >-
+                        external-dns provider for publishing the load-balanced
+                        zone records (e.g. "aws" for Route53). When empty,
+                        external-dns is left provider-agnostic (no cloud DNS
+                        integration).
+                      enum:
+                        - ""
+                        - aws
+                        - azure
+                        - google
+                        - cloudflare
+                      default: ""
+                    extdnsCredentialsSecretName:
+                      type: string
+                      description: >-
+                        Name of a Secret (in the k8gb namespace) holding the
+                        external-dns provider credentials. For aws/Route53 it
+                        must contain keys access_key_id, secret_access_key and
+                        (optionally) session_token. PREFER ambient identity
+                        (IRSA / Workload Identity) and leave this EMPTY; static
+                        keys are currently wired as env vars on the external-dns
+                        container, so scope them to Route53-only and rotate them.
+                        See examples/resilientcontrolplane-gslb.yaml.
                     dnsZones:
                       type: array
                       description: DNS zones for k8gb
@@ -171,9 +248,32 @@ spec:
                   type: object
                   description: Heartbeat mechanism configuration
                   properties:
-                    tagKey:
+                    read:
                       type: string
-                      description: Tag/label key for heartbeat timestamp
+                      description: >-
+                        How peer heartbeats are READ. "mr" (default) reads the
+                        provider-observed Observe MR, which is gated by the
+                        provider --poll interval (10m default) and can cause
+                        false-stale/split-brain unless freshnessTTLSeconds is
+                        set above the poll. "directApi" reads the peer's cloud
+                        resource directly in-function (seconds-fresh, no --poll
+                        dependency). PREREQUISITE: the composition function pod
+                        must have read-only credentials for every peer's cloud,
+                        wired via a pre-created Function + DeploymentRuntimeConfig
+                        (see examples/directapi-heartbeat.yaml). Without them the
+                        direct read fails and the peer is treated as unreadable,
+                        holding this CP at standby (fail-safe). The WRITE path is
+                        unchanged either way.
+                      enum:
+                        - mr
+                        - directApi
+                      default: mr
+                    livenessKey:
+                      type: string
+                      description: >-
+                        Key under which each control plane stamps its last-reconcile
+                        epoch — the liveness marker peers read to judge freshness.
+                        Written as a tag on AWS/Azure and a label on GCP.
                       default: last-reconciliation-timestamp-utc
                     freshnessTTLSeconds:
                       type: integer
@@ -185,13 +285,32 @@ spec:
                       description: Minimum seconds between heartbeat writes
                       default: 60
                       minimum: 10
+                    readTimeoutSeconds:
+                      type: integer
+                      description: >-
+                        Per-call timeout (seconds) for directApi peer heartbeat
+                        reads (heartbeat.read=directApi). Cross-cloud or cold
+                        reads (e.g. an Azure-hosted function calling AWS SSM,
+                        plus the first AAD/OIDC token fetch) can exceed a small
+                        budget; too low yields spurious "peer unreadable" and
+                        blocks leader election. Tunable at runtime via the claim
+                        (no rebuild). Ignored in mr read mode.
+                      default: 10
+                      minimum: 1
                 policyControl:
                   type: object
-                  description: Management policy control configuration
+                  description: >-
+                    Management policy control configuration. Only "convention"
+                    mode is implemented today; "patch"/"both" (direct MR
+                    patching) are NOT YET IMPLEMENTED — the function does not
+                    read this block for patch mode (see docs/SPEC.md §9.2).
                   properties:
                     mode:
                       type: string
-                      description: Policy toggle mechanism
+                      description: >-
+                        Policy toggle mechanism. "convention" (default) is the
+                        only implemented mode; "patch"/"both" are NOT YET
+                        IMPLEMENTED (deferred, see docs/SPEC.md §9.2).
                       enum:
                         - convention
                         - patch
@@ -199,7 +318,9 @@ spec:
                       default: convention
                     managedResourceSelector:
                       type: object
-                      description: Selector for managed resources (patch mode only)
+                      description: >-
+                        Selector for managed resources (patch mode only). NOT YET
+                        IMPLEMENTED — ignored until the patch path lands.
                       properties:
                         matchLabels:
                           type: object
@@ -211,7 +332,11 @@ spec:
                   properties:
                     automatic:
                       type: boolean
-                      description: Enable automatic failback
+                      description: >-
+                        Enable automatic failback. NOT YET IMPLEMENTED as a
+                        toggle — the function does not read this field; failback
+                        is currently always automatic, damped by
+                        hysteresisPeriods.
                       default: true
                     hysteresisPeriods:
                       type: integer
@@ -228,7 +353,6 @@ spec:
                   enum:
                     - leader
                     - standby
-                    - unknown
                 managementPolicy:
                   type: array
                   description: Published management policy decision

@@ -18,13 +18,18 @@ spec:
     version: '>=v1.0.0'
   - apiVersion: pkg.crossplane.io/v1
     kind: Provider
+    package: xpkg.upbound.io/upbound/provider-kubernetes
+    version: '>=v0.16.0'
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Provider
     package: xpkg.upbound.io/upbound/provider-aws-ssm
     version: '>=v2.6.0'
   description: |
     Autonomous multi-control-plane failover/failback via Crossplane
     managementPolicies. Installed on every control plane in a resilience set:
-    exactly one control plane holds managementPolicies ["*"] over the shared
-    managed resources while the others sit at ["Observe"], with automatic
+    exactly one control plane is the management leader — its governed resources
+    keep their author-declared managementPolicies (not forced to ["*"]) — while
+    the others reduce to the passive policy (default ["Observe"]), with automatic
     failover and failback driven by k8gb GSLB health plus a cross-CP heartbeat
     ledger. Implemented with a Python composition function.
   license: Apache-2.0

@@ -62,7 +62,7 @@ def evaluate(gslbs: list, hostname: str, strategy: str) -> GslbSignal:
     # records for the hostname (i.e. traffic is being routed here). In
     # roundRobin/geoip every healthy cluster is active; in failover only the
     # currently-serving geo is.
-    healthy_records = set(status.get("healthyRecords", {}).get(hostname, []) or [])
+    healthy_records = set((status.get("healthyRecords") or {}).get(hostname, []) or [])
     exposed_ips = set((status.get("loadBalancer", {}) or {}).get("exposedIps", []) or [])
     active = bool(healthy_records and exposed_ips and (healthy_records & exposed_ips))
 
