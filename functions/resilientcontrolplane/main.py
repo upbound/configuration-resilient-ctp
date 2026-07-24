@@ -54,12 +54,17 @@ _VENDOR_DIR = _resolve_vendor_dir(os.path.abspath(os.path.dirname(__file__)))
 if _VENDOR_DIR and _VENDOR_DIR not in sys.path:
     sys.path.append(_VENDOR_DIR)
 
-from crossplane.function import resource, response
+from crossplane.function import logging as fn_logging, resource, response
 
 from . import (cloud_read, election, gslb, gslb_build, heartbeat, k8gb_install,
                status)
 from .prelude import (ROLE_TAG, SELF_HB, TS_TAG_DEFAULT, as_int, now_epoch,
                       peer_hb_resource_name)
+
+# Module logger -> the function pod's stdout (kubectl logs deploy/<function>).
+# The up-served runner calls logging.configure(); structlog binds lazily, so a
+# module-level get_logger() is safe at import time.
+_log = fn_logging.get_logger()
 
 # Bound the directApi peer-read thread fan-out (Perf1). Cap the pool so
 # ``read_timeout * N`` can't blow the gRPC reconcile deadline: reads run in
@@ -172,6 +177,30 @@ def _compose(req, rsp):
         prior_status=prior_status, hysteresis_periods=hysteresis,
         write_throttle=throttle, now=now, strategy=strategy,
     )
+
+    # 3b. Leadership-change observability. Emit ONLY on a role TRANSITION, never
+    # every reconcile: the function runs every few seconds, so an event/log per
+    # reconcile would flood the XR event stream (and the API server rate-limits
+    # duplicate events anyway). prior_role is the role THIS function last wrote to
+    # status, so decision.role != prior_role is a genuine handoff. Two channels:
+    #   * response.normal -> an Event on the ResilientControlPlane XR, visible via
+    #     `kubectl describe resilientcontrolplane <name>` / `kubectl get events`;
+    #   * _log.info -> the function pod's stdout (`kubectl logs deploy/<function>`)
+    #     for a durable, greppable timeline across all XRs the pod serves.
+    prior_role = prior_status.get("role", "")
+    if decision.role != prior_role:
+        _log.info(
+            "leadership change",
+            cp=identity["id"], from_role=prior_role or "none",
+            to_role=decision.role, policy=decision.management_policy,
+            reason=decision.reason,
+        )
+        response.normal(
+            rsp,
+            f"leadership change: {identity['id']} "
+            f"{prior_role or 'none'} -> {decision.role} "
+            f"(policy {decision.management_policy}): {decision.reason}",
+        )
 
     # 4a. Own heartbeat, throttled: reuse the previous epoch if it is still
     # within the throttle window AND the role hasn't changed.
