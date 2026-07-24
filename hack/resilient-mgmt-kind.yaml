@@ -41,10 +41,11 @@
 #   durability for memory-speed fsync on a throwaway cluster.
 #
 # COMPANION STEPS the kind config cannot do (see create-mgmt-cluster.sh + docs):
-#   - `docker update --memory`/`--cpuset-cpus` per node: kubelet reservations do
-#     NOT cap host RAM (every node reports the full VM -> overcommit -> the HOST
-#     OOM-killer can kill etcd/apiserver). Real per-node ceilings + core pinning
-#     only exist at the Docker layer.
+#   - `docker update --memory` (hard RAM cap) + `--cpu-shares` (weight the
+#     control-plane so apiserver/etcd win CPU under contention but can burst all
+#     cores when workers are idle) per node: kubelet reservations do NOT cap host
+#     RAM (every node reports the full VM -> overcommit -> the HOST OOM-killer can
+#     kill etcd/apiserver). Real per-node ceilings only exist at the Docker layer.
 #   - Relax Crossplane-CORE leader-election at install (this file only relaxes
 #     the kubeadm scheduler/controller-manager).
 ---
