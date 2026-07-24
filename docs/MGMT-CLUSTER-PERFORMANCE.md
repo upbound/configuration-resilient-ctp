@@ -130,3 +130,38 @@ env) on the Crossplane deployment similarly.
 providers + VirtioFS — removes both halves of the bottleneck and leverages the
 spare RAM. The Docker VM has ~26 GB; etcd for ~500 CRDs needs 1–2 GB, so tmpfs is
 comfortably sized.
+
+## Update (2026-07-24): multi-node + on-disk, reviewed via 8 lenses
+
+`hack/resilient-mgmt-kind.yaml` + `hack/create-mgmt-cluster.sh` now bring up a
+**load-ready** cluster on a single Docker Desktop VM (14 CPU / 27 GB). Key
+findings from the review that changed the earlier single-node manifest:
+
+- **⚠️ The kubeadm patches must be `v1beta3`, not `v1beta4`.** kind v0.25.0 /
+  k8s 1.31.2 generates `v1beta3` (extraArgs is a **map**, not the v1beta4
+  name/value **list**). A v1beta4 patch makes kind's strategic merge NULL the
+  lists (`scheduler: extraArgs: null`), so the etcd tuning **and the relaxed
+  leader-election silently never apply** — the exact crashloop config, believed
+  fixed. Verify after create: the scheduler/etcd pods must show
+  `--leader-elect-renew-deadline=45s` and `--quota-backend-bytes=…`, not just
+  `--leader-elect=true`.
+- **etcd: on-disk (durable), NOT tmpfs.** The MRs are the only handles to real
+  billed cloud infra (EKS/AKS/GKE); a Docker restart wiping RAM-backed etcd would
+  orphan it. On-disk + the tuning + relaxed LE fixes the crashloop without that
+  risk, now that the narrow MRAP cut active CRDs to ~116 (¼ of the ~500 that
+  saturated fsync). (`/tmp` IS tmpfs in the kind node — verified — so tmpfs
+  remains an option for a truly throwaway cluster.)
+- **HA multi-member etcd is rejected.** On one VM, 3 members share one disk (one
+  failure domain, zero real availability) and TRIPLE the quorum fsync load.
+  Single member + mitigations is correct.
+- **Real per-node limits are at the Docker layer, not kind/kubelet.** kubelet
+  `systemReserved`/`kubeReserved` don't cap host RAM (every node sees the full
+  VM → overcommit → host OOM-killer can hit etcd). `create-mgmt-cluster.sh`
+  applies `docker update --memory` + **`--cpuset-cpus` (pins the control-plane to
+  dedicated cores** so provider churn can't starve apiserver/etcd — the taint
+  alone is scheduling-only and gives no CPU/IO isolation on a shared kernel).
+- **Companion step the kind config can't do:** relax **crossplane-core**
+  leader-election at install (kind only relaxes the kubeadm scheduler/CM).
+
+Topology: 1 tainted control-plane (6 GiB, cores 0-3, single etcd) + 2 workers
+(9 GiB each, cores 4-8 / 9-13). Bring up with `hack/create-mgmt-cluster.sh`.

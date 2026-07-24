@@ -1,80 +1,109 @@
 # Reusable kind manifest for the `resilient-mgmt` management cluster.
+# Bring it up with the companion script (which also applies the per-node Docker
+# memory caps that kind itself cannot express):
 #
-#   kind create cluster --config hack/resilient-mgmt-kind.yaml
+#   hack/create-mgmt-cluster.sh
 #
-# WHY THIS EXISTS (see docs/MGMT-CLUSTER-PERFORMANCE.md for the full write-up):
-# A default kind cluster running Crossplane + the aws/azure/gcp provider FAMILIES
-# (~500 CRDs) repeatedly crashloops kube-scheduler / kube-controller-manager /
-# crossplane with "leader election lost: context deadline exceeded". The
-# bottleneck is NOT RAM/CPU (the host had 26GB free, 14 cores idle) — it is
-# etcd's WAL fsync latency on Docker Desktop's virtualized disk, saturated by the
-# write volume from ~500 CRDs. Every leader-election lease renewal is an etcd
-# write that must fsync; when fsync is slow and the queue backs up, renewals miss
-# their deadline and the component dies.
+# WHY THIS EXISTS (see docs/MGMT-CLUSTER-PERFORMANCE.md): a default kind cluster
+# running Crossplane + the aws/azure/gcp providers crashlooped kube-scheduler /
+# controller-manager / crossplane with "leader election lost" — etcd WAL fsync
+# saturation on the virtualized disk, driven by the CRD/write volume. This
+# manifest (reviewed by 8 independent lenses, 2026-07-24) attacks that on a
+# SINGLE Docker Desktop VM (14 CPU / 26.4 GB), where you CANNOT get true HA or
+# true per-node isolation — all "nodes" are containers sharing one kernel, CPU
+# set, and disk. So the design is: remove/relax the bottleneck, isolate at the
+# scheduling layer, and cap resources at the Docker layer.
 #
-# This manifest removes both halves of the bottleneck:
-#   1. etcd dataDir -> /tmp/etcd, which is TMPFS (RAM) inside the kind node, so
-#      fsync is memory-speed. (Confirmed: `/tmp` is tmpfs, sized ~50% of the
-#      Docker VM RAM; `/dev/shm` is only 64MB so is NOT used.)
-#   2. etcd tuning + relaxed leader-election so transient spikes never crashloop
-#      the control plane.
+# TOPOLOGY: 1 control-plane (SINGLE etcd member, TAINTED so no workloads) + 2
+#   workers. NOT multi-member/HA etcd: on one VM, 3 members share one disk (one
+#   failure domain, zero real availability) and TRIPLE the quorum-fsync load that
+#   caused the crashloops.
 #
-# ⚠️ DURABILITY TRADEOFF: tmpfs is RAM — a kind node restart or a Docker Desktop
-# restart WIPES etcd, destroying all cluster state (Crossplane installs, XRs,
-# ProviderConfigs). That is fine for a DISPOSABLE test management cluster you
-# recreate from scratch, which is exactly this cluster's role. Do NOT use tmpfs
-# etcd for anything whose state you cannot afford to lose on restart — for that,
-# delete the `etcd.local.dataDir` line below (etcd falls back to on-disk
-# /var/lib/etcd) and keep only the tuning + leader-election relaxation, which
-# alone fixes the crashloop while staying durable.
+# etcd: ON-DISK (durable). We deliberately do NOT use tmpfs `/tmp/etcd` here:
+#   this cluster's managed resources are the only in-cluster handles to REAL
+#   billed cloud infra (EKS/VPC, AKS, GKE), so a Docker/VM restart wiping a
+#   RAM-backed etcd would ORPHAN that infra with no delete path. On-disk etcd on
+#   the node's durable /var volume + the tuning below fixes the crashloop without
+#   that risk (post-MRAP the active CRD count is ~116, far below the ~500 that
+#   saturated fsync). To trade durability for memory-speed fsync on a throwaway
+#   cluster, add `dataDir: /tmp/etcd` under etcd.local (/tmp IS tmpfs in the kind
+#   node — verified) and accept total state loss on restart.
 #
-# The other durable lever (recommended regardless): install only the SPECIFIC
-# service providers the tests need instead of whole provider families, to cut the
-# CRD/write load. See the performance doc.
+# COMPANION STEPS the kind config cannot do (see create-mgmt-cluster.sh + docs):
+#   - `docker update --memory` per node container: kubelet systemReserved/
+#     kubeReserved do NOT cap host RAM (every node reports the full 26.4 GB →
+#     overcommit → the HOST OOM-killer can kill etcd/apiserver before kubelet
+#     eviction fires). Real per-node RAM ceilings only exist at the Docker layer.
+#   - Relax Crossplane-CORE leader-election at install (this file only relaxes
+#     the kubeadm scheduler/controller-manager; crossplane-core runs its own LE
+#     at controller-runtime defaults ~15s/10s and can still lose it under churn).
 ---
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: resilient-mgmt
 nodes:
+  # ---- control-plane: dedicated to etcd + apiserver + controllers ----
   - role: control-plane
     kubeadmConfigPatches:
-      # kubeadm v1beta4 (Kubernetes 1.31+); extraArgs are name/value LISTS.
+      # ⚠️ kind v0.25.0 / k8s 1.31.2 generates kubeadm **v1beta3**, where
+      # extraArgs is a MAP (name: value), NOT the v1beta4 name/value LIST.
+      # Patching with v1beta4 makes kind's strategic merge NULL these lists
+      # (verified: `scheduler: extraArgs: null`), silently dropping the tuning.
+      # Match the generated version — v1beta3, map form — so they actually apply.
       - |
-        apiVersion: kubeadm.k8s.io/v1beta4
+        apiVersion: kubeadm.k8s.io/v1beta3
         kind: ClusterConfiguration
         etcd:
           local:
-            # RAM-backed etcd: /tmp is tmpfs in the kind node -> fsync at memory
-            # speed. Remove this line to keep etcd on-disk (durable) and rely on
-            # the tuning + leader-election relaxation below instead.
-            dataDir: /tmp/etcd
+            # ON-DISK (durable) — no dataDir override. See header for the tmpfs
+            # tradeoff if you ever want a throwaway RAM-backed cluster instead.
             extraArgs:
-              # Default backend quota is 2Gi; ~500 CRDs + churn can approach it.
-              - name: quota-backend-bytes
-                value: "8589934592"        # 8 GiB
-              # Snapshot less often (fewer fsync-heavy compactions).
-              - name: snapshot-count
-                value: "10000"
-              # Be tolerant of slower disk if dataDir is ever moved off tmpfs.
-              - name: heartbeat-interval
-                value: "250"               # ms
-              - name: election-timeout
-                value: "2500"              # ms
+              # Right-sized for ~116 active MRDs (real db << 1 GiB); default 2Gi.
+              quota-backend-bytes: "2147483648"   # 2 GiB
+              # Keep history bounded so the on-disk WAL/db stay small.
+              snapshot-count: "10000"
+              auto-compaction-mode: "periodic"
+              auto-compaction-retention: "1h"
         # Relaxed leader-election so a transient etcd/API stall does not crashloop
-        # the control-plane controllers (defaults are 15s/10s/2s).
+        # the kubeadm control-plane controllers (defaults 15s/10s/2s).
         controllerManager:
           extraArgs:
-            - name: leader-elect-lease-duration
-              value: "60s"
-            - name: leader-elect-renew-deadline
-              value: "45s"
-            - name: leader-elect-retry-period
-              value: "10s"
+            leader-elect-lease-duration: "60s"
+            leader-elect-renew-deadline: "45s"
+            leader-elect-retry-period: "10s"
         scheduler:
           extraArgs:
-            - name: leader-elect-lease-duration
-              value: "60s"
-            - name: leader-elect-renew-deadline
-              value: "45s"
-            - name: leader-elect-retry-period
-              value: "10s"
+            leader-elect-lease-duration: "60s"
+            leader-elect-renew-deadline: "45s"
+            leader-elect-retry-period: "10s"
+      - |
+        apiVersion: kubeadm.k8s.io/v1beta3
+        kind: InitConfiguration
+        nodeRegistration:
+          # Re-add the control-plane taint (kind strips it only for single-node
+          # clusters; with workers present kubeadm keeps it). Pushes Crossplane +
+          # provider pods onto the workers, away from etcd/apiserver.
+          taints:
+            - key: node-role.kubernetes.io/control-plane
+              effect: NoSchedule
+      - |
+        # KubeletConfiguration is taken ONLY from the first control-plane and
+        # applied CLUSTER-WIDE (uploaded to the kubelet-config ConfigMap; workers
+        # inherit it). So these reservations/eviction apply to ALL nodes. Do NOT
+        # add KubeletConfiguration to workers — kubeadm ignores it there.
+        apiVersion: kubelet.config.k8s.io/v1beta1
+        kind: KubeletConfiguration
+        maxPods: 80
+        systemReserved:
+          cpu: "500m"
+          memory: "1Gi"
+        kubeReserved:
+          cpu: "500m"
+          memory: "1Gi"
+        evictionHard:
+          memory.available: "512Mi"
+  # ---- workers: Crossplane core + provider pods + composition functions ----
+  # (No kubeadmConfigPatches: KubeletConfiguration on a worker is dead config;
+  # they inherit maxPods/reservations from the control-plane's cluster-wide CM.)
+  - role: worker
+  - role: worker
