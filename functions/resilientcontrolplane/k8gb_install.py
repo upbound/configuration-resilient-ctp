@@ -4,8 +4,8 @@ Ported from configuration-k8gb-bluegreen's ``functions/k8gb-operator`` (KCL):
 installs nginx-ingress and the k8gb operator as namespaced Helm Releases
 (``helm.m.crossplane.io/v1beta1``). Gated by ``spec.k8gb.install``:
 
-- ``never``  (default): render nothing.
-- ``auto``:  render only when k8gb is NOT detected present.
+- ``auto``  (default): render only when k8gb is NOT detected present.
+- ``never``: render nothing.
 - ``always``: always render.
 
 Detection for ``auto`` is coarse (presence of a k8gb Gslb resource). The
@@ -16,9 +16,27 @@ ingress config covers the common case. See ROADMAP backlog.
 
 _NGINX = "k8gb-nginx-ingress"
 _K8GB = "k8gb-operator"
-# Public alias: main.py reads this Release's observed readiness to gate Gslb
-# creation (Gslb CRD only exists once the operator Release is Ready).
+# Public aliases (composition-resource-names). main.py reads the operator
+# Release's observed readiness to gate Gslb creation (Gslb CRD only exists once
+# the operator Release is Ready), and treats EITHER observed Release as a sticky
+# "already installed" signal (H2).
 K8GB_OPERATOR = _K8GB
+K8GB_NGINX = _NGINX
+
+# M-7: Helm chart coordinates named here as the single source of truth instead
+# of being buried as literals inside build().
+#
+# k8gb operator chart (docs/SPEC.md §4.1). Version is overridable via
+# spec.k8gb.version; the others are pinned.
+K8GB_CHART_NAME = "k8gb"
+K8GB_CHART_REPOSITORY = "https://www.k8gb.io"
+K8GB_CHART_VERSION = "v0.15.0"
+
+# ingress-nginx controller chart (LoadBalancer Service -> external address for
+# the Gslb-managed ingress).
+NGINX_CHART_NAME = "ingress-nginx"
+NGINX_CHART_REPOSITORY = "https://kubernetes.github.io/ingress-nginx"
+NGINX_CHART_VERSION = "4.0.15"
 
 
 def should_install(mode: str, external_k8gb_present: bool,
@@ -80,7 +98,7 @@ def build(identity: dict, members: list, k8gb: dict, namespace: str,
     geo = identity.get("geoTag", "")
     ext_geos = sorted({m.get("geoTag", "") for m in members
                        if m.get("geoTag") and m.get("geoTag") != geo})
-    version = k8gb.get("version", "v0.15.0")
+    version = k8gb.get("version", K8GB_CHART_VERSION)
     dns_zones = k8gb.get("dnsZones", [
         {"parentZone": "example.com", "loadBalancedZone": "cloud.example.com",
          "negTTL": 30}
@@ -104,9 +122,9 @@ def build(identity: dict, members: list, k8gb: dict, namespace: str,
     # ingress a real external address.
     nginx = _release(
         _NGINX, namespace, helm_provider_config,
-        {"name": "ingress-nginx",
-         "repository": "https://kubernetes.github.io/ingress-nginx",
-         "version": "4.0.15"},
+        {"name": NGINX_CHART_NAME,
+         "repository": NGINX_CHART_REPOSITORY,
+         "version": NGINX_CHART_VERSION},
         "k8gb",
         {
             "controller": {
@@ -125,7 +143,8 @@ def build(identity: dict, members: list, k8gb: dict, namespace: str,
     # publishes the CoreDNS LB as the NS target for the load-balanced zone.
     k8gb_rel = _release(
         _K8GB, namespace, helm_provider_config,
-        {"name": "k8gb", "repository": "https://www.k8gb.io", "version": version},
+        {"name": K8GB_CHART_NAME, "repository": K8GB_CHART_REPOSITORY,
+         "version": version},
         "k8gb",
         {
             "k8gb": {
