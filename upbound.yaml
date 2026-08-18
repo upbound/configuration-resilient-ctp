@@ -15,15 +15,23 @@ spec:
   - apiVersion: pkg.crossplane.io/v1
     kind: Provider
     package: xpkg.upbound.io/upbound/provider-helm
-    version: '>=v1.0.0'
+    version: v1
   - apiVersion: pkg.crossplane.io/v1
     kind: Provider
     package: xpkg.upbound.io/upbound/provider-kubernetes
-    version: '>=v0.16.0'
+    version: v1
   - apiVersion: pkg.crossplane.io/v1
     kind: Provider
     package: xpkg.upbound.io/upbound/provider-aws-ssm
-    version: '>=v2.6.0'
+    version: v2
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Provider
+    package: xpkg.upbound.io/upbound/provider-family-azure
+    version: v2
+  - apiVersion: pkg.crossplane.io/v1
+    kind: Provider
+    package: xpkg.upbound.io/upbound/provider-gcp-storage
+    version: v2
   description: |
     Autonomous multi-control-plane failover/failback via Crossplane
     managementPolicies. Installed on every control plane in a resilience set:
