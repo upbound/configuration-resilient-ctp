@@ -45,8 +45,19 @@ def peer_hb_resource_name(cp_id: str) -> str:
 
 
 def as_int(value, default: int = 0) -> int:
-    """Best-effort int() that never raises (heartbeat tags are strings)."""
+    """Best-effort int() that never raises.
+
+    Heartbeat tags are strings ("1792970780"), but numbers read back from the
+    XR status arrive as floats (1792970780.0): struct_to_dict converts a
+    protobuf Struct, whose numbers are doubles. int("1792970780.0") raises, so
+    without the float path status.selfHeartbeatEpoch read as 0 and a freshly
+    promoted lower-priority member demoted itself on the next reconcile.
+    """
     try:
         return int(str(value).strip())
     except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError, OverflowError):
         return default
